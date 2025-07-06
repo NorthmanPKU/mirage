@@ -26,6 +26,13 @@
 #include "utils.cuh"
 namespace kernel {
 
+#define SINGLE_PRINT(...) \
+    do { \
+        if (threadIdx.x == 0 && blockIdx.x == 0) { \
+            printf(__VA_ARGS__); \
+        } \
+    } while(0)
+
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128
 // Load Q = 8 X 128, K = 1 X 128, V = 1 X 128
 // load K into K_Cache, V into V_cache
@@ -60,45 +67,54 @@ __device__ __forceinline__ void
 
   size_t total_seq_len = seq_len + EXTEND_NUM;
 
+  constexpr int TOTAL_Q_VEC_NUM = NUM_Q_HEADS * (EXTEND_NUM + 1);
+  constexpr int NUM_Q_TOKEN_DIM_ITER = (TOTAL_Q_VEC_NUM + 16 - 1) / 16;
   size_t num_iterations = (total_seq_len + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
   int curr_iter_len = std::min(total_seq_len, KV_CHUNK_SIZE);
   int cp_finished_seq_len = curr_iter_len;
   int last_seq_len = curr_iter_len;
 
+  // These are just the first line of the new qkvs
   const __restrict__ T *d_q = static_cast<T const *>(qkv_ptr);
   const __restrict__ T *d_k =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * NUM_Q_HEADS;
   const __restrict__ T *d_v =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
+  constexpr int NEW_QKVS_OFFSET = HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
   T __restrict__ *d_k_cache = static_cast<T *>(k_cache_ptr);
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
 
-  dmem_row_const<T, NUM_Q_HEADS, 128, 128> q_dmem(d_q); // [4 * 128 * 2B]
-  dmem_row_const<T, 1, 128, 128> k_dmem(d_k); // [1 * 128 * 2B]
-  dmem_row_const<T, 1, 128, 128> v_dmem(d_v); // [1 * 128 * 2B]
+  // second & third parameter in the template is actually not used
+  dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, NEW_QKVS_OFFSET> q_dmem(d_q); // [4 * 128 * 2B]
+  dmem_row_const<T, 1, 128, NEW_QKVS_OFFSET> k_dmem(d_k); // [1 * 128 * 2B]
+  dmem_row_const<T, 1, 128, NEW_QKVS_OFFSET> v_dmem(d_v); // [1 * 128 * 2B]
   dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> k_cache_dmem(d_k_cache);
   dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> v_cache_dmem(d_v_cache);
-  dmem_row<T, NUM_Q_HEADS, 128, 128> output_dmem(d_output);
+  dmem_row<T, TOTAL_Q_VEC_NUM, 128, 128> output_dmem(d_output); // [NUM_Q_HEADS * (EXTEND_NUM + 1) * 128 * 2B]
 
   extern __shared__ char smem[];
 
   constexpr size_t SHARED_Q_OFFSET = 128;
 
-  constexpr size_t SHARED_K_OFFSET = SHARED_Q_OFFSET + EXTEND_NUM * HEAD_DIM * sizeof(T);
+  constexpr size_t SHARED_K_OFFSET = SHARED_Q_OFFSET + TOTAL_Q_VEC_NUM * HEAD_DIM * sizeof(T);
   constexpr size_t SHARED_K_BUFFER_OFFSET = SHARED_K_OFFSET + KV_CHUNK_SIZE * HEAD_DIM * sizeof(T);
   constexpr size_t SHARED_V_OFFSET = SHARED_K_BUFFER_OFFSET + KV_CHUNK_SIZE * HEAD_DIM * sizeof(T);
   constexpr size_t SHARED_V_BUFFER_OFFSET = SHARED_V_OFFSET + KV_CHUNK_SIZE * HEAD_DIM * sizeof(T);
   
   constexpr size_t D_OFFSET = SHARED_V_BUFFER_OFFSET + KV_CHUNK_SIZE * HEAD_DIM * sizeof(T);
-  constexpr size_t MAX_OFFSET = D_OFFSET + HEAD_DIM * sizeof(float);
-  constexpr size_t O_OFFSET = MAX_OFFSET + HEAD_DIM * sizeof(float);
+  constexpr size_t MAX_OFFSET = D_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * sizeof(float); // TODO: check
+  constexpr size_t O_OFFSET = MAX_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * sizeof(float); // TODO: check
 
-  constexpr size_t Q_NORM_SUM_OFFSET = O_OFFSET + HEAD_DIM * 32 * sizeof(float); // TODO: check
+  constexpr size_t Q_NORM_SUM_OFFSET = O_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * 4/*0 1 4 5 for t0*/ * 8/* 8 iter along hidden dim */ * sizeof(float); // TODO: check
   constexpr size_t K_NORM_SUM_OFFSET = Q_NORM_SUM_OFFSET + NUM_WARPS * sizeof(float);
+
+  constexpr size_t TOTAL_SHARED_MEM_SIZE = K_NORM_SUM_OFFSET + NUM_WARPS * sizeof(float);
   
   constexpr size_t SHARED_OUTPUT_OFFSET = 128;
   constexpr size_t ZERO_BUFFER_OFFSET = 0;
+
+  SINGLE_PRINT("TOTAL_SHARED_MEM_SIZE: %zu\n", TOTAL_SHARED_MEM_SIZE);
 
   // copy input
   T *shared_q = (T *)(smem + SHARED_Q_OFFSET); // 1792 bytes (7 * 128 * 2B)
@@ -124,10 +140,10 @@ __device__ __forceinline__ void
   // zero buffer
   smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
 
-  using QSmem = smem_row<T, 3, 3, 3, NUM_Q_HEADS * EXTEND_NUM, 128, 128>;
+  using QSmem = smem_row<T, 3, 3, 3, TOTAL_Q_VEC_NUM, 128, 128>;
   using KSmem = smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128>;
   using VSmem = smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128>;
-  using OSmem = smem_row<T, 3, 3, 3, NUM_Q_HEADS * EXTEND_NUM, 128, 128>;
+  using OSmem = smem_row<T, 3, 3, 3, TOTAL_Q_VEC_NUM, 128, 128>;
   QSmem q_smem(shared_q);
 
   KSmem k_cache_smem(shared_k); // 16384 bytes (64 * 128 * 2B)
@@ -144,26 +160,20 @@ __device__ __forceinline__ void
   }
 
   // load first Q, K, V
-#pragma unroll
-  for (int i = threadIdx.x; i < NUM_Q_HEADS * EXTEND_NUM * (HEAD_DIM / 8);
+  #pragma unroll
+  for (int i = threadIdx.x; i < TOTAL_Q_VEC_NUM * (HEAD_DIM / 8);
        i += NUM_THREADS) {
     // offset
-    int row = i / 16;
-    int col = (i % 16) * 8;
-    load_smem(q_smem(row, col), q_dmem(row, col));
+    int q_smem_row = i / 16;
+    int q_smem_col = (i % 16) * 8;
+
+    int q_dmem_row = i / (NUM_Q_HEADS * (HEAD_DIM / 8));
+    int q_dmem_col = (i % (NUM_Q_HEADS * (HEAD_DIM / 8))) * 8;
+
+    load_smem(q_smem(q_smem_row, q_smem_col), q_dmem(q_dmem_row, q_dmem_col));
   }
 
-  // metadata for flashattention
-  // TODO: check if this is enough
-  float o[8][8];
-#pragma unroll
-  for (int n = 0; n < 8; n++) {
-    clear_8_floats(o[n]);
-  }
-  float d_sum = 1.f;
-  float m = -inf;
-
-#pragma unroll
+  #pragma unroll
   for (int i = threadIdx.x; i < (curr_iter_len * 16); i += NUM_THREADS) {
     // offset
     int row = i / 16;
@@ -177,6 +187,7 @@ __device__ __forceinline__ void
     }
   }
 
+  // V data loading: extract V from each token's QKV data for new tokens
   #pragma unroll
   for (int i = threadIdx.x; i < (curr_iter_len * 16); i += NUM_THREADS) {
     // offset
@@ -190,7 +201,34 @@ __device__ __forceinline__ void
   }
   cp_async_fence();
 
-  // KV iteration
+  // metadata for flashattention
+  // TODO: check if this is enough
+  float o[NUM_Q_TOKEN_DIM_ITER][8][8];
+  #pragma unroll
+  for (int q_head_i = 0; q_head_i < NUM_Q_TOKEN_DIM_ITER; q_head_i++) {
+    #pragma unroll
+    for (int n = 0; n < 8; n++) {
+      clear_8_floats(o[q_head_i][n]);
+    }
+  }
+  // float d_sum = 1.f;
+  float d_sum[2 * NUM_Q_TOKEN_DIM_ITER];
+  #pragma unroll
+  for(int i = 0; i < 2 * NUM_Q_TOKEN_DIM_ITER; i++) {
+    d_sum[i] = 1.f;
+  }
+  // float m = -inf;
+  float m[2 * NUM_Q_TOKEN_DIM_ITER];
+  #pragma unroll
+  for(int i = 0; i < 2 * NUM_Q_TOKEN_DIM_ITER; i++) {
+    //TODO: Chunk value assignment
+    m[i] = -inf;
+  }
+
+  /*
+  KV iteration
+  */
+
   //  N = 64 per iter
   for (uint32_t kv_idx = 0; kv_idx < num_iterations; kv_idx += 1) {
     // load next k, v
@@ -200,9 +238,9 @@ __device__ __forceinline__ void
                                (kv_idx + 1) * KV_CHUNK_SIZE)
             : -1;
 
-      // async load next k, v
-      if (kv_idx + 1 != num_iterations) {
-#pragma unroll
+    // async load next k, v
+    if (kv_idx + 1 != num_iterations) {
+      #pragma unroll
       for (int i = threadIdx.x; i < (next_iter_len * 16); i += NUM_THREADS) {
         // offset
         int row = i / 16;
@@ -214,7 +252,7 @@ __device__ __forceinline__ void
                     k_cache_dmem(cp_finished_seq_len + row, col));
         }
       }
-#pragma unroll
+      #pragma unroll
       for (int i = threadIdx.x; i < (next_iter_len * 16); i += NUM_THREADS) {
         // offset
         int row = i / 16;
@@ -258,20 +296,35 @@ __device__ __forceinline__ void
     }
 
     // knorm
+    // if (qk_norm && kv_idx == num_iterations - 1) {
+    //   window_rms_norm<T, KSmem, NUM_KV_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
+    //       k_cache_smem,
+    //       static_cast<T const *>(knorm_weight_ptr),
+    //       knorm_sum,
+    //       k_eps,
+    //       rotary_emd,
+    //       static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM, //TODO: check the index of cos and sin
+    //       static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+    // }
+    // TODO: Currently assume all new kvs are in the same last chunk
     if (qk_norm && kv_idx == num_iterations - 1) {
-      window_rms_norm<T, KSmem, NUM_KV_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
+      for(int row_offset = curr_iter_len - EXTEND_NUM - 1; row_offset <= curr_iter_len - 1; row_offset++) {
+        int cur_id = row_offset - (curr_iter_len - EXTEND_NUM - 1) + seq_len - 1;
+        rms_norm<T, KSmem, NUM_KV_HEADS, HEAD_DIM>(
           k_cache_smem,
           static_cast<T const *>(knorm_weight_ptr),
           knorm_sum,
           k_eps,
+          row_offset,
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM, //TODO: check the index of cos and sin
-          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+          static_cast<T const *>(cos_ptr) + cur_id * HEAD_DIM, //TODO: check the index of cos and sin
+          static_cast<T const *>(sin_ptr) + cur_id * HEAD_DIM
+          );
+      }
     }
     __syncthreads();
 
     // MMA
-    constexpr int NUM_Q_TOKEN_DIM_ITER = (NUM_Q_HEADS * EXTEND_NUM + 16 - 1) / 16;
     float s_frag[NUM_Q_TOKEN_DIM_ITER][8];
     #pragma unroll
     for(int i = 0; i < NUM_Q_TOKEN_DIM_ITER; i++) {
@@ -291,31 +344,228 @@ __device__ __forceinline__ void
       int m_col = k * 16 + idx_in_warp / 16 * 8;
       int n_col = ((idx_in_warp % 16) / 8) * 8 + k * 16;
 
+      bool is_valid_B = (n_row < curr_iter_len);
+      T *src_ptr_B =
+          is_valid_B ? k_cache_smem(n_row, n_col) : zero_buffer(0, 0);
+      ldsm(src_ptr_B, &b_frag[0]);
       #pragma unroll
       for(int q_head_i = 0; q_head_i < NUM_Q_TOKEN_DIM_ITER; q_head_i++) {
 
         int m_row = idx_in_warp % 16 + q_head_i * 16;
 
-        bool is_valid_A = (m_row < NUM_Q_HEADS * EXTEND_NUM);
+        bool is_valid_A = (m_row < TOTAL_Q_VEC_NUM);
         T *src_ptr_A = is_valid_A ? q_smem(m_row, m_col) : zero_buffer(0, 0);
         ldsm(src_ptr_A, &a_frag[0]);
 
-        bool is_valid_B = (n_row < curr_iter_len);
-        T *src_ptr_B =
-            is_valid_B ? k_cache_smem(n_row, n_col) : zero_buffer(0, 0);
-        ldsm(src_ptr_B, &b_frag[0]);
-
-        mma_m16n16k16_bf16bf16bf32(s_frag, a_frag, b_frag, s_frag);
+        mma_m16n16k16_bf16bf16bf32(s_frag[q_head_i], a_frag, b_frag, s_frag[q_head_i]);
       }
     }
     __syncthreads();
-    // To be continued...
+
+        // update flashattention
+    // TODO: m is a vector now
+    // float m_prev = m;
+
+    #pragma unroll
+    for(int q_head_i = 0; q_head_i < NUM_Q_TOKEN_DIM_ITER; q_head_i++) {
+        #pragma unroll
+        for(int l = 0; l < 2; l++) { // upper 8 or lower 8
+          // get local max
+          float m_prev = m[q_head_i * 2 + l];
+          #pragma unroll
+          for (int i = 0; i < 2; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+              // update M, apply mask when length doesn't match the padding length 16
+              int idx = l * 2 + i * 4 + j; // 0 1 4 5 / 2 3 6 7
+              // int row = idx_in_warp / 4;
+              int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16; // [16, 64]'s col
+              s_frag[q_head_i][idx] = (col < curr_iter_len) ? s_frag[q_head_i][idx] : -inf;
+              m[q_head_i * 2 + l] = max(s_frag[q_head_i][idx], m[q_head_i * 2 + l]);
+            }
+          }
+          // get global max across 4 threads
+          m[q_head_i * 2 + l] = max(m[q_head_i * 2 + l], shfl_xor_sync(m[q_head_i * 2 + l], 0x2));
+          m[q_head_i * 2 + l] = max(m[q_head_i * 2 + l], shfl_xor_sync(m[q_head_i * 2 + l], 0x1));
+          
+          // update m, d, o
+          // float o_scale = expf(m_prev * sm_scale - m * sm_scale);
+          float o_scale = expf(m_prev * sm_scale - m[q_head_i * 2 + l] * sm_scale);
+          float d_local = 0.f;
+          d_sum[q_head_i * 2 + l] *= o_scale;
+
+          // update across local 4 threads
+          #pragma unroll
+          for (int i = 0; i < 2; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+              int idx = l * 2 + i * 4 + j;
+              // s_frag[idx] = expf(s_frag[idx] * sm_scale - m * sm_scale);
+              int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
+              int row = idx_in_warp / 4 + q_head_i * 16 + l * 8;
+              // 0 means exp(-inf)
+              s_frag[q_head_i][idx] = ((col < curr_iter_len) && (row < TOTAL_Q_VEC_NUM))
+                                ? expf(s_frag[q_head_i][idx] * sm_scale - m[q_head_i * 2 + l] * sm_scale)
+                                : 0;
+              d_local += s_frag[q_head_i][idx];
+            }
+          }
+
+          // update o
+          // TODO: check if this is correct
+          #pragma unroll
+          for (int n = 0; n < 8; ++n) {
+            o[q_head_i][n][0 + 2 * l] *= o_scale;
+            o[q_head_i][n][1 + 2 * l] *= o_scale;
+            o[q_head_i][n][4 + 2 * l] *= o_scale;
+            o[q_head_i][n][5 + 2 * l] *= o_scale;
+          }
+          // sum the d across 4threads
+          d_local += shfl_xor_sync(d_local, 0X1);
+          d_local += shfl_xor_sync(d_local, 0X2);
+          d_sum[q_head_i * 2 + l] += d_local;
+        } // l
+
+        // //QK^T * V
+        uint32_t o_frag[4];
+        convert_f32_to_bf16_uint32(s_frag[q_head_i], o_frag);
+
+        for (int n = 0; n < 8; n++) {
+          int v_row = idx_in_warp % 16 + warp_idx * 16;
+          int v_col = idx_in_warp / 16 * 8 + n * 16;
+          bool is_valid_C = (v_row < curr_iter_len);
+          T *src_ptr_C =
+              is_valid_C ? v_cache_smem(v_row, v_col) : zero_buffer(0, 0);
+          ldsm_t(src_ptr_C, v_frag);
+          mma_m16n16k16_bf16bf16bf32(o[q_head_i][n], o_frag, v_frag, o[q_head_i][n]);
+        }
+        __syncthreads();
+
+      } // q_head_i
+      if (kv_idx != num_iterations) {
+        last_seq_len = curr_iter_len;
+        cp_finished_seq_len += next_iter_len;
+        curr_iter_len = next_iter_len;
+      }
+  } // kv_idx
+
+  #pragma unroll
+  for(int q_head_i = 0; q_head_i < NUM_Q_TOKEN_DIM_ITER; q_head_i++) {
+    #pragma unroll
+    for(int l = 0; l < 2; l++) { // (0 1 4 5) or (2 3 6 7)
+      #pragma unroll
+      for (int n = 0; n < 8; n++) { // 8 blocks along HEAD_DIM
+        // write the result to osmem, index is 0, 1, 4, 5 / 2, 3, 6, 7
+        #pragma unroll
+        for (int i = 0; i < 2; i++) { // (0 1) or (4 5)
+          int reg_idx = l * 2 + i * 4; // 0, 1, 4, 5 / 2, 3, 6, 7
+          // o_smem[q_head_i][l][threadIdx.x * 32 + n * 4 + i * 2] = o[q_head_i][n][reg_idx];
+          // o_smem[q_head_i][l][threadIdx.x * 32 + n * 4 + i * 2 + 1] = o[q_head_i][n][reg_idx + 1];
+          int osmem_offset = q_head_i * 2 * NUM_THREADS * 32 + l * NUM_THREADS * 32 + threadIdx.x * 32 + n * 4 + i * 2;
+          // 0&1 / 4&5 / 2&3 / 6&7
+          o_smem[osmem_offset] = o[q_head_i][n][reg_idx];
+          o_smem[osmem_offset + 1] = o[q_head_i][n][reg_idx + 1];
+        }
+      }
+      if (m[q_head_i * 2 + l] != -inf) {
+        m[q_head_i * 2 + l] *= sm_scale;
+      }
+      d_smem[threadIdx.x] = d_sum[q_head_i * 2 + l];
+      max_smem[threadIdx.x] = m[q_head_i * 2 + l];
+      __syncthreads();
+      m[q_head_i * 2 + l] = -inf;
+      d_sum[q_head_i * 2 + l] = 1.f;
+
+      if (warp_idx == 0) {
+        // TODO: 0 is not needed
+        // Reduce across 4 warps
+        #pragma unroll
+        for (uint32_t warp_id = 0; warp_id < 4; warp_id++) {
+          // head idx is idx in warp / 4
+          // TODO: I think this is int shmem_idx = idx_in_warp + warp_id * 32
+          // This is actually mapping to the related threads in different warps
+          int shmem_idx = (idx_in_warp / 4) * 4 + warp_id * 32 + (idx_in_warp % 4);
+          float other_m = max_smem[shmem_idx];
+          float other_d = d_smem[shmem_idx];
+          // update o,m,d across threads
+          float m_prev = m[q_head_i * 2 + l], d_prev = d_sum[q_head_i * 2 + l];
+          m[q_head_i * 2 + l] = max(m_prev, other_m);
+          d_sum[q_head_i * 2 + l] = d_prev * expf(m_prev - m[q_head_i * 2 + l]) + other_d * expf(other_m - m[q_head_i * 2 + l]);
+
+          // reduction on K
+          #pragma unroll
+          for (uint32_t n = 0; n < 8; n++) {
+            #pragma unroll
+            for (uint32_t frag_idx = 0; frag_idx < 2; frag_idx++) {
+              int osmem_offset = q_head_i * 2 * NUM_THREADS * 32 + l * NUM_THREADS * 32 + shmem_idx * 32 + n * 4 + frag_idx * 2;
+              int reg_idx = frag_idx * 4 + l * 2;
+              float o_new1 = o_smem[osmem_offset];
+              float o_new2 = o_smem[osmem_offset + 1];
+              o[q_head_i][n][reg_idx] = o[q_head_i][n][reg_idx] * expf(m_prev - m[q_head_i * 2 + l]) +
+                                  o_new1 * expf(other_m - m[q_head_i * 2 + l]);
+              o[q_head_i][n][reg_idx + 1] = o[q_head_i][n][reg_idx + 1] * expf(m_prev - m[q_head_i * 2 + l]) +
+                                      o_new2 * expf(other_m - m[q_head_i * 2 + l]);
+            }
+          }
+        }
+      }
+      __syncthreads();
+
+    }// l
+
+    if (warp_idx == 0) {
+      // update the o and m and d on other warps
+      // print each head
+      #pragma unroll
+      for (int n = 0; n < 8; n++) {
+        #pragma unroll
+        for (uint32_t i = 0; i < 4; i++) {
+          // if (warp_idx == 0) {
+            int row = idx_in_warp / 4 + 8 * (i % 2) + q_head_i * 16;
+            int col = (idx_in_warp % 4) * 2 + 8 * (i / 2) + n * 16;
+            // i   row   col
+            // 0   0     0
+            // 1   8     0
+            // 2   0     8
+            // 3   8     8
+            if (row < TOTAL_Q_VEC_NUM) {
+              output_smem.at(row, col) = bfloat16(o[q_head_i][n][i * 2] / d_sum[q_head_i * 2 + i % 2]);
+              output_smem.at(row, col + 1) = bfloat16(o[q_head_i][n][i * 2 + 1] / d_sum[q_head_i * 2 + i % 2]);
+            }
+          // }
+        }
+      }
+    }
+    __syncthreads();
+  }// q_head_i
+
+  // write output to device memory
+  #pragma unroll
+  for (int i = threadIdx.x; i < (TOTAL_Q_VEC_NUM * 128); i += NUM_THREADS) {
+    // offset
+    int row = i / 128;
+    int col = (i % 128);
+    output_dmem.at(row, col) = output_smem.at(row, col);
   }
 
+  // // update KV cache
+  // #pragma unroll
+  // for (int row_new_kv = seq_len - 1; row_new_kv < seq_len + EXTEND_NUM; row_new_kv++) {
+  //   #pragma unroll
+  //   for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
+  //     int col = i;
+  //     k_cache_dmem.at(row_new_kv, col) = k_cache_smem.at(row_new_kv - (seq_len - 1), col);
+  //   }
+  // }
 
-
-  // To be continued...
-
+  // #pragma unroll
+  // for (int row_new_kv = seq_len - 1; row_new_kv < seq_len + EXTEND_NUM; row_new_kv++) {
+  //   #pragma unroll
+  //   for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
+  //     int col = i;
+  //     v_cache_dmem.at(row_new_kv, col) = v_cache_smem.at(row_new_kv - (seq_len - 1), col);
+  //   }
+  // }
 
 }
 
