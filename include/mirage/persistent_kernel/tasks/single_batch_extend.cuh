@@ -80,7 +80,7 @@ __device__ __forceinline__ void
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * NUM_Q_HEADS;
   const __restrict__ T *d_v =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
-  constexpr int NEW_QKVS_OFFSET = HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
+  constexpr int NEW_QKVS_OFFSET = HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS);
   T __restrict__ *d_k_cache = static_cast<T *>(k_cache_ptr);
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
@@ -114,7 +114,7 @@ __device__ __forceinline__ void
   constexpr size_t SHARED_OUTPUT_OFFSET = 128;
   constexpr size_t ZERO_BUFFER_OFFSET = 0;
 
-  SINGLE_PRINT("TOTAL_SHARED_MEM_SIZE: %zu\n", TOTAL_SHARED_MEM_SIZE);
+  SINGLE_PRINT("TOTAL_SHARED_MEM_SIZE: %llu\n", (unsigned long long)TOTAL_SHARED_MEM_SIZE);
 
   // copy input
   T *shared_q = (T *)(smem + SHARED_Q_OFFSET); // 1792 bytes (7 * 128 * 2B)
@@ -163,7 +163,7 @@ __device__ __forceinline__ void
   #pragma unroll
   for (int i = threadIdx.x; i < TOTAL_Q_VEC_NUM * (HEAD_DIM / 8);
        i += NUM_THREADS) {
-    // offset
+    // offset in shared memory
     int q_smem_row = i / 16;
     int q_smem_col = (i % 16) * 8;
 
@@ -179,8 +179,9 @@ __device__ __forceinline__ void
     int row = i / 16;
     int col = (i % 16) * 8;
     if (row >= seq_len - 1) { // last and extended tokens
-      // from qkv
-      load_smem(k_cache_smem_buffer(row, col), k_dmem(row - (seq_len - 1), col));
+      // from qk
+      int token_idx = row - (seq_len - 1);
+      load_smem(k_cache_smem_buffer(row, col), k_dmem(token_idx, col));
     } else {
       // from cache
       load_smem(k_cache_smem_buffer(row, col), k_cache_dmem(row, col));
@@ -194,7 +195,9 @@ __device__ __forceinline__ void
     int row = i / 16;
     int col = (i % 16) * 8;
     if (row >= seq_len - 1) { // last and extended tokens
-      load_smem(v_cache_smem_buffer(row, col), v_dmem(row - (seq_len - 1), col));
+      // from qkv
+      int token_idx = row - (seq_len - 1);
+      load_smem(v_cache_smem_buffer(row, col), v_dmem(token_idx, col));
     } else {
       load_smem(v_cache_smem_buffer(row, col), v_cache_dmem(row, col));
     }
@@ -246,7 +249,9 @@ __device__ __forceinline__ void
         int row = i / 16;
         int col = (i % 16) * 8;
         if (row + cp_finished_seq_len >= seq_len - 1) {
-          load_smem(k_cache_smem(row, col), k_dmem(row + cp_finished_seq_len - (seq_len - 1), col));
+          // from qkv
+          int token_idx = row + cp_finished_seq_len - (seq_len - 1);
+          load_smem(k_cache_smem(row, col), k_dmem(token_idx, col));
         } else {
           load_smem(k_cache_smem(row, col),
                     k_cache_dmem(cp_finished_seq_len + row, col));
@@ -258,7 +263,9 @@ __device__ __forceinline__ void
         int row = i / 16;
         int col = (i % 16) * 8;
         if (row + cp_finished_seq_len >= seq_len - 1) { 
-          load_smem(v_cache_smem(row, col), v_dmem(row + cp_finished_seq_len - (seq_len - 1), col));
+          // from qkv
+          int token_idx = row + cp_finished_seq_len - (seq_len - 1);
+          load_smem(v_cache_smem(row, col), v_dmem(token_idx, col));
         } else {
           load_smem(v_cache_smem(row, col),
                     v_cache_dmem(cp_finished_seq_len + row, col));
