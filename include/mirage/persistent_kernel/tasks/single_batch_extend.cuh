@@ -120,7 +120,6 @@ __device__ __forceinline__ void
   constexpr size_t SHARED_OUTPUT_OFFSET = 128;
   constexpr size_t ZERO_BUFFER_OFFSET = 0;
 
-  SINGLE_PRINT("TOTAL_SHARED_MEM_SIZE: %llu\n", (unsigned long long)TOTAL_SHARED_MEM_SIZE);
 
   // copy input
   T *shared_q = (T *)(smem + SHARED_Q_OFFSET); // 1792 bytes (7 * 128 * 2B)
@@ -383,7 +382,16 @@ __device__ __forceinline__ void
               int idx = l * 2 + i * 4 + j; // 0 1 4 5 / 2 3 6 7
               // int row = idx_in_warp / 4;
               int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16; // [16, 64]'s col
-              s_frag[q_head_i][idx] = (col < curr_iter_len) ? s_frag[q_head_i][idx] : -inf;
+              
+              // Apply causal mask
+              int q_row = idx_in_warp / 4 + q_head_i * 16 + l * 8;  // Q token row in the tensor
+              int q_token_idx = q_row / NUM_Q_HEADS;  // Which Q token (0 to EXTEND_NUM)
+              int q_token_pos = seq_len - 1 + q_token_idx;  // Absolute position of Q token
+              int k_cache_pos = kv_idx * KV_CHUNK_SIZE + col;  // Absolute position of K token
+              
+              // Apply both padding mask and causal mask
+              bool is_valid = (col < curr_iter_len) && (k_cache_pos <= q_token_pos);
+              s_frag[q_head_i][idx] = is_valid ? s_frag[q_head_i][idx] : -inf;
               m[q_head_i * 2 + l] = max(s_frag[q_head_i][idx], m[q_head_i * 2 + l]);
             }
           }
@@ -407,7 +415,14 @@ __device__ __forceinline__ void
               int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
               int row = idx_in_warp / 4 + q_head_i * 16 + l * 8;
               // 0 means exp(-inf)
-              s_frag[q_head_i][idx] = ((col < curr_iter_len) && (row < TOTAL_Q_VEC_NUM))
+              
+              // Apply causal mask in softmax computation too
+              int q_token_idx_softmax = row / NUM_Q_HEADS;  // Which Q token (0 to EXTEND_NUM)
+              int q_token_pos_softmax = seq_len - 1 + q_token_idx_softmax;  // Absolute position of Q token
+              int k_cache_pos_softmax = kv_idx * KV_CHUNK_SIZE + col;  // Absolute position of K token
+              bool is_valid_softmax = (col < curr_iter_len) && (row < TOTAL_Q_VEC_NUM) && (k_cache_pos_softmax <= q_token_pos_softmax);
+              
+              s_frag[q_head_i][idx] = is_valid_softmax
                                 ? expf(s_frag[q_head_i][idx] * sm_scale - m[q_head_i * 2 + l] * sm_scale)
                                 : 0;
               d_local += s_frag[q_head_i][idx];

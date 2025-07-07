@@ -49,7 +49,7 @@ def rmsnorm(X, W, eps):
     W_fp32 = W.to(torch.float32)
 
     variance = X_fp32.pow(2).mean(-1, keepdim=True)
-    print("torch square sum:", variance)
+    # print("torch square sum:", variance)
     inv_rms = torch.rsqrt(variance + eps)
     X_normed = X_fp32 * inv_rms
     out = X_normed * W_fp32
@@ -139,7 +139,8 @@ def attention_extend(q_tokens, k_new_tokens, v_new_tokens, k_cache, v_cache, val
         token_pos = valid_len - 1 + i
         # mask = torch.arange(total_len, device=scores.device)[None, :] <= token_pos
         # TODO: This is wrong, only to align with problematic cuda implementation
-        mask = torch.arange(total_len, device=scores.device) <= total_len  # [total_len]
+        # mask = torch.arange(total_len, device=scores.device) <= total_len  # [total_len]
+        mask = torch.arange(total_len, device=scores.device) <= token_pos
         # print("mask.shape:", mask.shape)
         
         # Expand mask to match scores shape [q_heads, 1, total_len]
@@ -171,7 +172,7 @@ def test_extend_correctness():
     # extend_nums = [1, 2, 3]
     # extend_nums = [0]
     # extend_nums = [5]
-    extend_nums = [3, 4, 5]
+    extend_nums = [0, 1, 2, 3, 4, 5]
     # test_seq_lens = [10, 50, 100]
     test_seq_lens = [10, 50, 100, 250, 500]
     # test_seq_lens = [10, 100, 250, 500]
