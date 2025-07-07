@@ -6,6 +6,7 @@
 #include "paged_attention.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
+#include "single_batch_extend.cuh"
 #include "single_batch_gqa.cuh"
 #include "embedding.cuh"
 #include "prompt_lookup.cuh"
@@ -20,6 +21,7 @@ using kernel::norm_linear_task_impl;
 using kernel::paged_attention_task_impl;
 using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
+using kernel::single_batch_extend_kernel;
 using kernel::single_batch_gqa_kernel;
 using kernel::embedding_kernel;
 using kernel::find_ngram_partial_kernel;
@@ -196,6 +198,225 @@ void single_batch_decoding(
                                            sin_ptr,
                                            q_eps,
                                            k_eps);
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+// Single Batch Extend
+
+template <typename T,
+          int NUM_Q_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int WEIGHT_STRIDE,
+          int EXTEND_NUM>
+__global__ void single_batch_extend_wrapper(void const *qkv_ptr,
+                                            void *k_cache_ptr,
+                                            void *v_cache_ptr,
+                                            void *output_ptr,
+                                            size_t seq_len,
+                                            bool qk_norm,
+                                            bool rotary_emd,
+                                            void const *qnorm_weight_ptr,
+                                            void const *knorm_weight_ptr,
+                                            void const *cos_ptr,
+                                            void const *sin_ptr,
+                                            float q_eps,
+                                            float k_eps,
+                                            void *q_norm_debug_ptr,
+                                            void *k_norm_debug_ptr) {
+  single_batch_extend_kernel<T,
+                             NUM_Q_HEADS,
+                             NUM_KV_HEADS,
+                             HEAD_DIM,
+                             WEIGHT_STRIDE,
+                             EXTEND_NUM>(qkv_ptr,
+                                        k_cache_ptr,
+                                        v_cache_ptr,
+                                        output_ptr,
+                                        seq_len,
+                                        qk_norm,
+                                        rotary_emd,
+                                        qnorm_weight_ptr,
+                                        knorm_weight_ptr,
+                                        cos_ptr,
+                                        sin_ptr,
+                                        q_eps,
+                                        k_eps,
+                                        q_norm_debug_ptr,
+                                        k_norm_debug_ptr);
+}
+
+void single_batch_extend(
+    torch::Tensor qkv,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor output,
+    size_t seq_len,
+    int extend_num,
+    bool qk_norm,
+    bool rotary_emd,
+    torch::optional<torch::Tensor> qnorm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> knorm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> cos = torch::nullopt,
+    torch::optional<torch::Tensor> sin = torch::nullopt,
+    float q_eps = 0.0f,
+    float k_eps = 0.0f,
+    torch::optional<torch::Tensor> q_norm_debug = torch::nullopt,
+    torch::optional<torch::Tensor> k_norm_debug = torch::nullopt) {
+  void const *qkv_ptr = qkv.data_ptr();
+  void *k_cache_ptr = k_cache.data_ptr();
+  void *v_cache_ptr = v_cache.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 150000; // 140,448 when extend_num = 4
+
+  void const *qnorm_weight_ptr = qk_norm ? qnorm_weight->data_ptr() : nullptr;
+  void const *knorm_weight_ptr = qk_norm ? knorm_weight->data_ptr() : nullptr;
+  void const *cos_ptr = rotary_emd ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = rotary_emd ? sin->data_ptr() : nullptr;
+  
+  // Debug output pointers (optional)
+  void *q_norm_debug_ptr = q_norm_debug.has_value() ? q_norm_debug->data_ptr() : nullptr;
+  void *k_norm_debug_ptr = k_norm_debug.has_value() ? k_norm_debug->data_ptr() : nullptr;
+
+  // Dynamic dispatch based on extend_num
+  switch (extend_num) {
+    case 0:
+      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>,
+                            cudaFuncAttributeMaxDynamicSharedMemorySize,
+                            smem_size);
+        single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>
+            <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                                k_cache_ptr,
+                                                v_cache_ptr,
+                                                output_ptr,
+                                                seq_len,
+                                                qk_norm,
+                                                rotary_emd,
+                                                qnorm_weight_ptr,
+                                                knorm_weight_ptr,
+                                                cos_ptr,
+                                                sin_ptr,
+                                                q_eps,
+                                                k_eps,
+                                                q_norm_debug_ptr,
+                                                k_norm_debug_ptr);
+      break;
+    case 1:
+      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size);
+      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>
+          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                               k_cache_ptr,
+                                               v_cache_ptr,
+                                               output_ptr,
+                                               seq_len,
+                                               qk_norm,
+                                               rotary_emd,
+                                               qnorm_weight_ptr,
+                                               knorm_weight_ptr,
+                                               cos_ptr,
+                                               sin_ptr,
+                                               q_eps,
+                                               k_eps,
+                                               q_norm_debug_ptr,
+                                               k_norm_debug_ptr);
+      break;
+    case 2:
+      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size);
+      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>
+          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                               k_cache_ptr,
+                                               v_cache_ptr,
+                                               output_ptr,
+                                               seq_len,
+                                               qk_norm,
+                                               rotary_emd,
+                                               qnorm_weight_ptr,
+                                               knorm_weight_ptr,
+                                               cos_ptr,
+                                               sin_ptr,
+                                               q_eps,
+                                               k_eps,
+                                               q_norm_debug_ptr,
+                                               k_norm_debug_ptr);
+      break;
+    case 3:
+      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size);
+      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>
+          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                               k_cache_ptr,
+                                               v_cache_ptr,
+                                               output_ptr,
+                                               seq_len,
+                                               qk_norm,
+                                               rotary_emd,
+                                               qnorm_weight_ptr,
+                                               knorm_weight_ptr,
+                                               cos_ptr,
+                                               sin_ptr,
+                                               q_eps,
+                                               k_eps,
+                                               q_norm_debug_ptr,
+                                               k_norm_debug_ptr);
+      break;
+    case 4:
+      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size);
+      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>
+          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                               k_cache_ptr,
+                                               v_cache_ptr,
+                                               output_ptr,
+                                               seq_len,
+                                               qk_norm,
+                                               rotary_emd,
+                                               qnorm_weight_ptr,
+                                               knorm_weight_ptr,
+                                               cos_ptr,
+                                               sin_ptr,
+                                               q_eps,
+                                               k_eps,
+                                               q_norm_debug_ptr,
+                                               k_norm_debug_ptr);
+      break;
+    case 5:
+      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           smem_size);
+      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>
+          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                               k_cache_ptr,
+                                               v_cache_ptr,
+                                               output_ptr,
+                                               seq_len,
+                                               qk_norm,
+                                               rotary_emd,
+                                               qnorm_weight_ptr,
+                                               knorm_weight_ptr,
+                                               cos_ptr,
+                                               sin_ptr,
+                                               q_eps,
+                                               k_eps,
+                                               q_norm_debug_ptr,
+                                               k_norm_debug_ptr);
+      break;
+    default:
+      printf("Unsupported extend_num: %d\n", extend_num);
+      break;
+  }
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -977,6 +1198,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sin") = py::none(),
         py::arg("q_eps") = 0.0f,
         py::arg("k_eps") = 0.0f);
+  m.def("single_batch_extend",
+        &single_batch_extend,
+        py::arg("qkv"),
+        py::arg("k_cache"),
+        py::arg("v_cache"),
+        py::arg("output"),
+        py::arg("seq_len"),
+        py::arg("extend_num"),
+        py::arg("qk_norm"),
+        py::arg("rotary_embed"),
+        py::arg("qnorm_weight") = py::none(),
+        py::arg("knorm_weight") = py::none(),
+        py::arg("cos") = py::none(),
+        py::arg("sin") = py::none(),
+        py::arg("q_eps") = 0.0f,
+        py::arg("k_eps") = 0.0f,
+        py::arg("q_norm_debug") = py::none(),
+        py::arg("k_norm_debug") = py::none());
   m.def("paged_attention", &paged_attention, "Paged Attention");
   m.def("window_rms_norm", &window_rms_norm, "Window RMSNorm");
 }
