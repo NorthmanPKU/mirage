@@ -26,13 +26,6 @@
 #include "utils.cuh"
 namespace kernel {
 
-#define SINGLE_PRINT(...) \
-    do { \
-        if (threadIdx.x == 0 && blockIdx.x == 0) { \
-            printf(__VA_ARGS__); \
-        } \
-    } while(0)
-
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128
 // Load Q = 8 X 128, K = 1 X 128, V = 1 X 128
 // load K into K_Cache, V into V_cache
@@ -55,7 +48,11 @@ __device__ __forceinline__ void
                                  void const *cos_ptr,
                                  void const *sin_ptr,
                                  float q_eps,
-                                 float k_eps) {
+                                 float k_eps,
+                                 void *q_norm_debug_ptr = nullptr,
+                                 void *k_norm_debug_ptr = nullptr) {
+                                        //print norm weight
+
   // constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
@@ -85,6 +82,10 @@ __device__ __forceinline__ void
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
 
+  // Debug output tensors (optional)
+  T *d_q_norm_debug = static_cast<T *>(q_norm_debug_ptr);
+  T *d_k_norm_debug = static_cast<T *>(k_norm_debug_ptr);
+
   // second & third parameter in the template is actually not used
   dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, NEW_QKVS_OFFSET> q_dmem(d_q); // [4 * 128 * 2B]
   dmem_row_const<T, 1, 128, NEW_QKVS_OFFSET> k_dmem(d_k); // [1 * 128 * 2B]
@@ -92,6 +93,11 @@ __device__ __forceinline__ void
   dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> k_cache_dmem(d_k_cache);
   dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> v_cache_dmem(d_v_cache);
   dmem_row<T, TOTAL_Q_VEC_NUM, 128, 128> output_dmem(d_output); // [NUM_Q_HEADS * (EXTEND_NUM + 1) * 128 * 2B]
+  
+  // Debug tensor layouts (if enabled)
+  // dmem_row<T, NUM_Q_HEADS, 128, (EXTEND_NUM + 1) * 128> q_norm_debug_dmem(d_q_norm_debug); // [NUM_Q_HEADS, EXTEND_NUM+1, HEAD_DIM]
+  dmem_row<T, (EXTEND_NUM + 1) * NUM_Q_HEADS, 128, 128> q_norm_debug_dmem(d_q_norm_debug); // [NUM_Q_HEADS, EXTEND_NUM+1, HEAD_DIM]
+  dmem_row<T, EXTEND_NUM + 1, 128, 128> k_norm_debug_dmem(d_k_norm_debug); // [EXTEND_NUM+1, HEAD_DIM]
 
   extern __shared__ char smem[];
 
@@ -292,6 +298,7 @@ __device__ __forceinline__ void
 
     // q_norm
     if (qk_norm && kv_idx == 0) {
+
       window_rms_norm<T, QSmem, NUM_Q_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
           q_smem,
           static_cast<T const *>(qnorm_weight_ptr),
@@ -302,17 +309,6 @@ __device__ __forceinline__ void
           static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
     }
 
-    // knorm
-    // if (qk_norm && kv_idx == num_iterations - 1) {
-    //   window_rms_norm<T, KSmem, NUM_KV_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
-    //       k_cache_smem,
-    //       static_cast<T const *>(knorm_weight_ptr),
-    //       knorm_sum,
-    //       k_eps,
-    //       rotary_emd,
-    //       static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM, //TODO: check the index of cos and sin
-    //       static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
-    // }
     // TODO: Currently assume all new kvs are in the same last chunk
     if (qk_norm && kv_idx == num_iterations - 1) {
       for(int row_offset = curr_iter_len - EXTEND_NUM - 1; row_offset <= curr_iter_len - 1; row_offset++) {
