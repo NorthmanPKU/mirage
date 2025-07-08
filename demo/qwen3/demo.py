@@ -13,6 +13,18 @@ def grid_for_rmsnorm_linear_layer(size):
         return 96
     elif size % 64 == 0:
         return 64
+    
+def max_factor_leq_n(m: int, n: int) -> int:
+    max_factor = 1
+    i = 1
+    while i * i <= m:
+        if m % i == 0:
+            if i <= n:
+                max_factor = max(max_factor, i)
+            if m // i <= n:
+                max_factor = max(max_factor, m // i)
+        i += 1
+    return max_factor
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -152,7 +164,7 @@ if __name__ == "__main__":
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
         )
-        if spec_decode_config.method == "promptlookup":
+        if spec_decode_config and spec_decode_config.method == "promptlookup":
             all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
             argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
             num_tokens_extend = spec_decode_config.spec_length + 1
@@ -160,6 +172,7 @@ if __name__ == "__main__":
             argmax_batch_size = batch_size
             num_tokens_extend = 1
         total_tokens_per_iter = batch_size * num_tokens_extend
+        print(f"total_tokens_per_iter: {total_tokens_per_iter}")
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
@@ -168,7 +181,7 @@ if __name__ == "__main__":
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
-            max_seq_length=512,
+            max_seq_length=40,
             eos_token_id=model.config.eos_token_id,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
@@ -283,7 +296,8 @@ if __name__ == "__main__":
             input=x, 
             weight=w, 
             output=y, 
-            grid_dim=(96 // total_tokens_per_iter, total_tokens_per_iter, 1), 
+            # grid_dim=(max_factor_leq_n(4096, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
+            grid_dim=(1, 1, 1), 
             block_dim=(128, 1, 1)
         )
         x = y
@@ -329,18 +343,33 @@ if __name__ == "__main__":
             v_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
             )
-            mpk.attention_layer(
-                input=attn_in,
-                q_norm=w_q_norm,
-                k_norm=w_k_norm,
-                k_cache=k_cache,
-                v_cache=v_cache,
-                cos_pos_embed=cos_pos_embed,
-                sin_pos_embed=sin_pos_embed,
-                output=attn_out,
-                grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
-                block_dim=(128, 1, 1),
-            )
+            # TODO: Later attention kernels should be merged as one
+            if spec_decode_config:
+                mpk.single_batch_extend_attention_layer(
+                    input=attn_in,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    cos_pos_embed=cos_pos_embed,
+                    sin_pos_embed=sin_pos_embed,
+                    output=attn_out,
+                    grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
+                    block_dim=(128, 1, 1),
+                )
+            else:
+                mpk.attention_layer(
+                    input=attn_in,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    cos_pos_embed=cos_pos_embed,
+                    sin_pos_embed=sin_pos_embed,
+                    output=attn_out,
+                    grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
+                    block_dim=(128, 1, 1),
+                )
             # add linear w/ residual
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
@@ -428,7 +457,7 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         # add argmax layer
-        if spec_decode_config.method == "promptlookup":
+        if spec_decode_config and spec_decode_config.method == "promptlookup":
             argmax_partial_grid_dim = (96 // spec_decode_config.spec_length, spec_decode_config.spec_length + 1, 1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
