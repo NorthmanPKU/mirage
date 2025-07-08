@@ -238,6 +238,7 @@ class PersistentKernel:
         output: DTensor, # [batch_size, hidden_size]
         grid_dim: tuple,
         block_dim: tuple,
+        input_source: int = 0, # 0: all_tokens, 1: input_token
     ):
         # TODO: Support batch size > 1
         # tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -251,7 +252,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding")
+        self.kn_graph.register_task(tb_graph, "embedding", [input_source])
 
     def rmsnorm_linear_layer(
         self,
@@ -342,15 +343,15 @@ class PersistentKernel:
         
     def single_batch_extend_attention_layer(
         self,
-        input: DTensor,
-        k_cache: DTensor,
+        input: DTensor, # [6, 6144]
+        k_cache: DTensor, 
         v_cache: DTensor,
         q_norm: DTensor,
         k_norm: DTensor,
         cos_pos_embed: DTensor,
         sin_pos_embed: DTensor,
         output: DTensor,
-        grid_dim: tuple,
+        grid_dim: tuple, # (6, 8, 1)
         block_dim: tuple,
     ):
         # Currently assume that input/output
@@ -362,7 +363,8 @@ class PersistentKernel:
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim # 4
         rotary_embed = 0
-        extend_num = input.dim(0) // num_q_heads - 1 # not including the current token
+
+        extend_num = input.dim(0) - 1
         if cos_pos_embed is not None or sin_pos_embed is not None:
             assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
             assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)

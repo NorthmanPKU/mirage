@@ -13,8 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "common.h"
-#include "utils.cuh"
+#include "../common.h"
 namespace kernel {
 
 // simply sequential greedy search

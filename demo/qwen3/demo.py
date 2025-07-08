@@ -164,15 +164,6 @@ if __name__ == "__main__":
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
         )
-        if spec_decode_config and spec_decode_config.method == "promptlookup":
-            all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
-            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
-            num_tokens_extend = spec_decode_config.spec_length + 1
-        else:
-            argmax_batch_size = batch_size
-            num_tokens_extend = 1
-        total_tokens_per_iter = batch_size * num_tokens_extend
-        print(f"total_tokens_per_iter: {total_tokens_per_iter}")
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
@@ -181,12 +172,21 @@ if __name__ == "__main__":
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
-            max_seq_length=40,
+            max_seq_length=512,
             eos_token_id=model.config.eos_token_id,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
         )
+        
+        if spec_decode_config and spec_decode_config.method == "promptlookup":
+            all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
+            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
+            num_tokens_extend = spec_decode_config.spec_length + 1
+        else:
+            argmax_batch_size = batch_size
+            num_tokens_extend = 1
+        total_tokens_per_iter = batch_size * num_tokens_extend
         
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
@@ -205,7 +205,7 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         attn_in = mpk.new_tensor(
-            dims=(total_tokens_per_iter, fused_outdim_1 // world_size),
+            dims=(total_tokens_per_iter, fused_outdim_1 // world_size), # [6, 6144]
             dtype=mi.bfloat16,
             name="attn_in",
             io_category="cuda_tensor",
@@ -296,8 +296,8 @@ if __name__ == "__main__":
             input=x, 
             weight=w, 
             output=y, 
-            # grid_dim=(max_factor_leq_n(4096, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
-            grid_dim=(1, 1, 1), 
+            grid_dim=(max_factor_leq_n(4096, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
+            # grid_dim=(1, 1, 1), 
             block_dim=(128, 1, 1)
         )
         x = y
@@ -347,23 +347,23 @@ if __name__ == "__main__":
             if spec_decode_config:
                 mpk.single_batch_extend_attention_layer(
                     input=attn_in,
-                    q_norm=w_q_norm,
-                    k_norm=w_k_norm,
                     k_cache=k_cache,
                     v_cache=v_cache,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
                     cos_pos_embed=cos_pos_embed,
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
-                    grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
+                    grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
                     block_dim=(128, 1, 1),
                 )
             else:
                 mpk.attention_layer(
                     input=attn_in,
-                    q_norm=w_q_norm,
-                    k_norm=w_k_norm,
                     k_cache=k_cache,
                     v_cache=v_cache,
+                    q_norm=w_q_norm,
+                    k_norm=w_k_norm,
                     cos_pos_embed=cos_pos_embed,
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
@@ -458,7 +458,7 @@ if __name__ == "__main__":
         )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (96 // spec_decode_config.spec_length, spec_decode_config.spec_length + 1, 1)
+            argmax_partial_grid_dim = (96 // (spec_decode_config.spec_length + 1), spec_decode_config.spec_length + 1, 1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
             argmax_partial_grid_dim = (96, 1, 1)
@@ -475,10 +475,10 @@ if __name__ == "__main__":
             grid_dim=argmax_reduce_grid_dim,
             block_dim=(128, 1, 1),
         )
-        if args.spec_decode:
+        if spec_decode_config:
             # TODO:(Jianan Ji) Align the output of argmax_reduce with the spec tokens
             verify_out = mpk.verify_layer_dispatcher(
-                spec_decode = args.spec_decode,
+                spec_decode_config = spec_decode_config,
                 spec_tokens = spec_tokens,
                 target_output = argmax_out,
                 grid_dim = (1, 1, 1),

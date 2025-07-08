@@ -49,7 +49,8 @@ int TaskRegister::register_task_variant(runtime::TaskType type,
 
 int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  assert(params.size() == 0);
+  assert(params.size() == 1);
+  // params[0]: input source (0: tokens, 1: input_token)
   int batch_size = 0, output_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -75,7 +76,11 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::embedding_kernel<bfloat16, $, $, $>(", batch_size, output_size, output_stride);
-  code.e("    task_desc.inputs[0].base_ptr,");
+  if (params[0] == 0) {
+    code.e("    runtime_config.tokens + runtime_config.step[0], ");
+  } else if (params[0] == 1) {
+    code.e("    task_desc.inputs[0].base_ptr,");
+  }
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
@@ -451,7 +456,7 @@ int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgra
   code.e("kernel::find_ngram_global_kernel<$, $, $>(", params[0], params[1], num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    runtime_config.step[0] + 1);");
   return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
 }
@@ -481,8 +486,8 @@ int TaskRegister::register_target_verify_greedy_task(threadblock::Graph const &b
   code.e("kernel::target_verify_greedy_kernel<$>(", num_spec_tokens);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    &(runtime_config.new_token_num),"); // int pointer
-  code.e("    runtime_config.tokens + runtime_config.step[0] + 1);");
+  code.e("    (void*)&(runtime_config.new_token_num),"); // int pointer
+  code.e("    (void*)runtime_config.tokens + runtime_config.step[0] + 1);");
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
