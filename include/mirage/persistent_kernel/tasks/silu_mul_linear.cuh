@@ -221,7 +221,7 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         int src_row = i >> log2_CHUNKS_PER_ROW_A;
-        int dst_row = src_row + ((k_pipe + 1) << log2_constexpr(BATCH_SIZE));
+        int dst_row = src_row + ((k_pipe + 1) * BATCH_SIZE);
         int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
         int src_col = dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
         load_smem(input_buffer_smem(dst_row, dst_col),
@@ -360,11 +360,12 @@ __device__ __forceinline__ void
     }
 
 #pragma unroll
-    for (int i = threadIdx.x; i < OUTPUT_SIZE; i += NUM_THREADS) {
-      int row = 0;
-      T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
-                              : mm_intermediate_smem.at(row, i);
-      output_dmem.at(row, i) = residual ? val + residual_smem.at(row, i) : val;
+    for (int row = 0; row < BATCH_SIZE; row++) {
+      for (int i = threadIdx.x; i < OUTPUT_SIZE; i += NUM_THREADS) {
+        T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
+                                : mm_intermediate_smem.at(row, i);
+        output_dmem.at(row, i) = residual ? val + residual_smem.at(row, i) : val;
+      }
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();
