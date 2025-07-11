@@ -3,6 +3,7 @@
 #include "linear.cuh"
 #include "norm.cuh"
 #include "norm_linear.cuh"
+// #include "norm_linear_original.cuh"
 #include "paged_attention.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
@@ -12,6 +13,7 @@
 #include "prompt_lookup.cuh"
 #include "target_verify.cuh"
 #include "bfloat16.h"
+#include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -228,6 +230,7 @@ __global__ void single_batch_extend_wrapper(void const *qkv_ptr,
                                             float k_eps,
                                             void *q_norm_debug_ptr,
                                             void *k_norm_debug_ptr) {
+  printf("single_batch_extend_kernel<%d, %d, %d, %d, %d>\n", NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, EXTEND_NUM);
   single_batch_extend_kernel<T,
                              NUM_Q_HEADS,
                              NUM_KV_HEADS,
@@ -286,6 +289,7 @@ void single_batch_extend(
   void *k_norm_debug_ptr = k_norm_debug.has_value() ? k_norm_debug->data_ptr() : nullptr;
 
   // Dynamic dispatch based on extend_num
+  printf("single_batch_extend extend_num: %d\n", extend_num);
   switch (extend_num) {
     case 0:
       cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>,
@@ -396,6 +400,8 @@ void single_batch_extend(
       cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>,
                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                            smem_size);
+
+      printf("single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>\n");
       single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                                k_cache_ptr,
@@ -578,6 +584,7 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            float eps,
                                            void *output_ptr) {
+  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE);
   norm_linear_task_impl<T,
                         BATCH_SIZE,
                         OUTPUT_SIZE,
@@ -594,17 +601,63 @@ void launch_norm_linear(void const *input_ptr,
                         void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 1024 * 99;
+  size_t smem_size = 1024 * 150;
+
 
   cudaFuncSetAttribute(
       norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       smem_size);
 
+  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE);
   norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(
           input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
 }
+
+// Macro-based dispatch system for norm_linear - Three-dimensional dispatch
+#define NORM_LINEAR_CALL(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) \
+  launch_norm_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>( \
+      input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+
+#define NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) \
+  case REDUCTION_SIZE: \
+    NORM_LINEAR_CALL(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) \
+    break;
+
+#define NORM_LINEAR_DISPATCH_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
+  switch (input.size(1)) { \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096) \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256) \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 128) \
+    default: \
+      printf("Unsupported reduction size in test: %zu\n", input.size(1)); \
+      break; \
+  }
+
+#define NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
+  case OUTPUT_SIZE: \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
+    break;
+
+// Define all specific combinations
+#define NORM_LINEAR_DISPATCH_COMBINATIONS(BATCH_SIZE) \
+  switch (output.size(1)) { \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16) \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32) \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64) \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256) \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600) \
+    default: \
+      printf("Unsupported output size in test: %zu\n", output.size(1)); \
+      break; \
+  }
+
+#define NORM_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE) \
+  case BATCH_SIZE: \
+    printf("input.size(0) == %d\n", BATCH_SIZE); \
+    NORM_LINEAR_DISPATCH_COMBINATIONS(BATCH_SIZE) \
+    break;
 
 void norm_linear(torch::Tensor input,
                  torch::Tensor norm_weight,
@@ -617,29 +670,19 @@ void norm_linear(torch::Tensor input,
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  switch (output.size(1)) {
-    case 16:
-      launch_norm_linear<bfloat16, 1, 16, 4096>(
-          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
-      break;
-    case 32:
-      launch_norm_linear<bfloat16, 1, 32, 4096>(
-          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
-      break;
-    case 64:
-      launch_norm_linear<bfloat16, 1, 64, 4096>(
-          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
-      break;
-    case 256:
-      launch_norm_linear<bfloat16, 1, 256, 4096>(
-          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
-      break;
-    case 1600:
-      launch_norm_linear<bfloat16, 1, 1600, 4096>(
-          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
-      break;
+  printf("input.size(0): %zu, output.size(1): %zu\n", input.size(0), output.size(1));
+
+  switch (input.size(0)) {
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(1)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(2)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(3)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(4)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(5)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(6)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(7)
+    NORM_LINEAR_DISPATCH_BATCH_SIZE(8)
     default:
-      printf("Unsupported output size in test: %zu\n", output.size(1));
+      printf("Unsupported batch size in test: %zu\n", input.size(0));
       break;
   }
 
@@ -842,6 +885,24 @@ void launch_silu_mul_linear(void const *input_ptr,
           input_ptr, weight_ptr, bias_ptr, output_ptr);
 }
 
+#define SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
+  case OUTPUT_SIZE: \
+    launch_silu_mul_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, 12288>( \
+        input_ptr, weight_ptr, bias_ptr, output_ptr); \
+    break;
+
+#define SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE) \
+  case BATCH_SIZE: \
+    switch (output.size(1)) { \
+    SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16) \
+    SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32) \
+    SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64) \
+    default: \
+      printf("Unsupported output size in test: %zu\n", output.size(1)); \
+      break; \
+    } \
+    break;
+
 void silu_mul_linear(torch::Tensor input,
                      torch::Tensor weight,
                      torch::Tensor bias,
@@ -852,19 +913,13 @@ void silu_mul_linear(torch::Tensor input,
   void const *bias_ptr = bias.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  switch (output.size(1)) {
-    case 16:
-      launch_silu_mul_linear<bfloat16, 1, 16, 12288>(
-          input_ptr, weight_ptr, bias_ptr, output_ptr);
-      break;
-    case 32:
-      launch_silu_mul_linear<bfloat16, 1, 32, 12288>(
-          input_ptr, weight_ptr, bias_ptr, output_ptr);
-      break;
-    case 64:
-      launch_silu_mul_linear<bfloat16, 1, 64, 12288>(
-          input_ptr, weight_ptr, bias_ptr, output_ptr);
-      break;
+  switch (input.size(0)) {
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(1)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(2)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(3)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(4)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(5)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(6)
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
       break;
@@ -906,6 +961,26 @@ void launch_linear(void const *input_ptr,
           input_ptr, weight_ptr, residual_ptr, output_ptr);
 }
 
+
+
+#define LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
+  case OUTPUT_SIZE: \
+    launch_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, 4096>( \
+        input_ptr, weight_ptr, residual_ptr, output_ptr); \
+    break; \
+
+#define LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE) \
+  case BATCH_SIZE: \
+    switch (output.size(1)) { \
+    LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16) \
+    LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32) \
+    LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64) \
+    default: \
+      printf("Unsupported output size in test: %zu\n", output.size(1)); \
+      break; \
+    } \
+    break;
+
 void linear(torch::Tensor input,
             torch::Tensor weight,
             torch::Tensor residual,
@@ -916,19 +991,13 @@ void linear(torch::Tensor input,
   void const *residual_ptr = residual.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  switch (output.size(1)) {
-    case 16:
-      launch_linear<bfloat16, 1, 16, 4096>(
-          input_ptr, weight_ptr, residual_ptr, output_ptr);
-      break;
-    case 32:
-      launch_linear<bfloat16, 1, 32, 4096>(
-          input_ptr, weight_ptr, residual_ptr, output_ptr);
-      break;
-    case 64:
-      launch_linear<bfloat16, 1, 64, 4096>(
-          input_ptr, weight_ptr, residual_ptr, output_ptr);
-      break;
+  switch (input.size(0)) {
+    LINEAR_DISPATCH_BATCH_SIZE(1)
+    LINEAR_DISPATCH_BATCH_SIZE(2)
+    LINEAR_DISPATCH_BATCH_SIZE(3)
+    LINEAR_DISPATCH_BATCH_SIZE(4)
+    LINEAR_DISPATCH_BATCH_SIZE(5)
+    LINEAR_DISPATCH_BATCH_SIZE(6)
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
       break;
@@ -955,7 +1024,7 @@ __global__ void embedding_kernel_wrapper(void const *input_ptr,
   if (blockIdx.x == 1 && blockIdx.y == 1 && threadIdx.x == 0) {
     printf("input_offset: %d, embedding_offset: %d, output_offset: %d\n", input_offset, embedding_offset, output_offset);
   }
-  embedding_kernel<T, CHUNK_SIZE, OUTPUT_DIM_SIZE>(
+  embedding_kernel<T, 1, CHUNK_SIZE, OUTPUT_DIM_SIZE>(
       input, embedding, output);
   // if (blockIdx.x == 1 && blockIdx.y == 1) {
   //   printf("input: %d, embedding: %d, output: %d\n", input, embedding, output);
