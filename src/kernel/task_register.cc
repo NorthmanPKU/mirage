@@ -174,7 +174,7 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.step[0],");
+  code.e("    runtime_config.step[0] + 1,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc.inputs[3].base_ptr,");
@@ -233,7 +233,7 @@ int TaskRegister::register_single_batch_extend_attention_task(threadblock::Graph
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.step[0],");
+  code.e("    runtime_config.step[0] + 1,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc.inputs[3].base_ptr,");
