@@ -122,7 +122,7 @@ __device__ __forceinline__ void
 
 
   // copy input
-  T *shared_q = (T *)(smem + SHARED_Q_OFFSET); // 1792 bytes (7 * 128 * 2B)
+  T *shared_q = (T *)(smem + SHARED_Q_OFFSET); // 1792 bytes (4 * 6 * 128 * 2B)
   // copy weight
   T *shared_k = (T *)(smem + SHARED_K_OFFSET); // 16384 bytes (64 * 128 * 2B)
   T *shared_k_buffer = (T *)(smem + SHARED_K_BUFFER_OFFSET); // 16384 bytes (64 * 128 * 2B)
@@ -246,6 +246,18 @@ __device__ __forceinline__ void
                                (kv_idx + 1) * KV_CHUNK_SIZE)
             : -1;
 
+    // Current chunk range: [kv_idx * KV_CHUNK_SIZE, kv_idx * KV_CHUNK_SIZE + curr_iter_len)
+    // New tokens range: [seq_len-1, seq_len+EXTEND_NUM) (includes original last token + EXTEND_NUM new tokens)
+    // Calculate intersection and write back if any
+    int chunk_start = kv_idx * KV_CHUNK_SIZE;
+    int chunk_end = chunk_start + curr_iter_len;
+    int new_tokens_start = seq_len - 1;
+    int new_tokens_end = seq_len + EXTEND_NUM;  // includes all EXTEND_NUM+1 tokens
+    
+    // These are used for norm and write back judgement
+    int cur_chunk_new_kv_start = max(chunk_start, new_tokens_start);
+    int cur_chunk_new_kv_end = min(chunk_end, new_tokens_end);
+
     // async load next k, v
     if (kv_idx + 1 != num_iterations) {
       #pragma unroll
@@ -363,108 +375,120 @@ __device__ __forceinline__ void
       }
     }
     __syncthreads();
-
-        // update flashattention
-    // TODO: m is a vector now
-    // float m_prev = m;
-
+    
     #pragma unroll
     for(int q_head_i = 0; q_head_i < NUM_Q_TOKEN_DIM_ITER; q_head_i++) {
+      #pragma unroll
+      for(int l = 0; l < 2; l++) { // upper 8 or lower 8
+        // get local max
+        float m_prev = m[q_head_i * 2 + l];
         #pragma unroll
-        for(int l = 0; l < 2; l++) { // upper 8 or lower 8
-          // get local max
-          float m_prev = m[q_head_i * 2 + l];
+        for (int i = 0; i < 2; ++i) {
           #pragma unroll
-          for (int i = 0; i < 2; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 2; ++j) {
-              // update M, apply mask when length doesn't match the padding length 16
-              int idx = l * 2 + i * 4 + j; // 0 1 4 5 / 2 3 6 7
-              // int row = idx_in_warp / 4;
-              int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16; // [16, 64]'s col
-              
-              // Apply causal mask
-              int q_row = idx_in_warp / 4 + q_head_i * 16 + l * 8;  // Q token row in the tensor
-              int q_token_idx = q_row / NUM_Q_HEADS;  // Which Q token (0 to EXTEND_NUM)
-              int q_token_pos = seq_len - 1 + q_token_idx;  // Absolute position of Q token
-              int k_cache_pos = kv_idx * KV_CHUNK_SIZE + col;  // Absolute position of K token
-              
-              // Apply both padding mask and causal mask
-              bool is_valid = (col < curr_iter_len) && (k_cache_pos <= q_token_pos);
-              s_frag[q_head_i][idx] = is_valid ? s_frag[q_head_i][idx] : -inf;
-              m[q_head_i * 2 + l] = max(s_frag[q_head_i][idx], m[q_head_i * 2 + l]);
-            }
+          for (int j = 0; j < 2; ++j) {
+            // update M, apply mask when length doesn't match the padding length 16
+            int idx = l * 2 + i * 4 + j; // 0 1 4 5 / 2 3 6 7
+            // int row = idx_in_warp / 4;
+            int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16; // [16, 64]'s col
+            
+            // Apply causal mask
+            int q_row = idx_in_warp / 4 + q_head_i * 16 + l * 8;  // Q token row in the tensor
+            int q_token_idx = q_row / NUM_Q_HEADS;  // Which Q token (0 to EXTEND_NUM)
+            int q_token_pos = seq_len - 1 + q_token_idx;  // Absolute position of Q token
+            int k_cache_pos = kv_idx * KV_CHUNK_SIZE + col;  // Absolute position of K token
+            
+            // Apply both padding mask and causal mask
+            bool is_valid = (col < curr_iter_len) && (k_cache_pos <= q_token_pos);
+            s_frag[q_head_i][idx] = is_valid ? s_frag[q_head_i][idx] : -inf;
+            m[q_head_i * 2 + l] = max(s_frag[q_head_i][idx], m[q_head_i * 2 + l]);
           }
-          // get global max across 4 threads
-          m[q_head_i * 2 + l] = max(m[q_head_i * 2 + l], shfl_xor_sync(m[q_head_i * 2 + l], 0x2));
-          m[q_head_i * 2 + l] = max(m[q_head_i * 2 + l], shfl_xor_sync(m[q_head_i * 2 + l], 0x1));
-          
-          // update m, d, o
-          // float o_scale = expf(m_prev * sm_scale - m * sm_scale);
-          float o_scale = expf(m_prev * sm_scale - m[q_head_i * 2 + l] * sm_scale);
-          float d_local = 0.f;
-          d_sum[q_head_i * 2 + l] *= o_scale;
-
-          // update across local 4 threads
-          #pragma unroll
-          for (int i = 0; i < 2; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 2; ++j) {
-              int idx = l * 2 + i * 4 + j;
-              // s_frag[idx] = expf(s_frag[idx] * sm_scale - m * sm_scale);
-              int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
-              int row = idx_in_warp / 4 + q_head_i * 16 + l * 8;
-              // 0 means exp(-inf)
-              
-              // Apply causal mask in softmax computation too
-              int q_token_idx_softmax = row / NUM_Q_HEADS;  // Which Q token (0 to EXTEND_NUM)
-              int q_token_pos_softmax = seq_len - 1 + q_token_idx_softmax;  // Absolute position of Q token
-              int k_cache_pos_softmax = kv_idx * KV_CHUNK_SIZE + col;  // Absolute position of K token
-              bool is_valid_softmax = (col < curr_iter_len) && (row < TOTAL_Q_VEC_NUM) && (k_cache_pos_softmax <= q_token_pos_softmax);
-              
-              s_frag[q_head_i][idx] = is_valid_softmax
-                                ? expf(s_frag[q_head_i][idx] * sm_scale - m[q_head_i * 2 + l] * sm_scale)
-                                : 0;
-              d_local += s_frag[q_head_i][idx];
-            }
-          }
-
-          // update o
-          // TODO: check if this is correct
-          #pragma unroll
-          for (int n = 0; n < 8; ++n) {
-            o[q_head_i][n][0 + 2 * l] *= o_scale;
-            o[q_head_i][n][1 + 2 * l] *= o_scale;
-            o[q_head_i][n][4 + 2 * l] *= o_scale;
-            o[q_head_i][n][5 + 2 * l] *= o_scale;
-          }
-          // sum the d across 4threads
-          d_local += shfl_xor_sync(d_local, 0X1);
-          d_local += shfl_xor_sync(d_local, 0X2);
-          d_sum[q_head_i * 2 + l] += d_local;
-        } // l
-
-        // //QK^T * V
-        uint32_t o_frag[4];
-        convert_f32_to_bf16_uint32(s_frag[q_head_i], o_frag);
-
-        for (int n = 0; n < 8; n++) {
-          int v_row = idx_in_warp % 16 + warp_idx * 16;
-          int v_col = idx_in_warp / 16 * 8 + n * 16;
-          bool is_valid_C = (v_row < curr_iter_len);
-          T *src_ptr_C =
-              is_valid_C ? v_cache_smem(v_row, v_col) : zero_buffer(0, 0);
-          ldsm_t(src_ptr_C, v_frag);
-          mma_m16n16k16_bf16bf16bf32(o[q_head_i][n], o_frag, v_frag, o[q_head_i][n]);
         }
-        __syncthreads();
+        // get global max across 4 threads
+        m[q_head_i * 2 + l] = max(m[q_head_i * 2 + l], shfl_xor_sync(m[q_head_i * 2 + l], 0x2));
+        m[q_head_i * 2 + l] = max(m[q_head_i * 2 + l], shfl_xor_sync(m[q_head_i * 2 + l], 0x1));
+        
+        // update m, d, o
+        // float o_scale = expf(m_prev * sm_scale - m * sm_scale);
+        float o_scale = expf(m_prev * sm_scale - m[q_head_i * 2 + l] * sm_scale);
+        float d_local = 0.f;
+        d_sum[q_head_i * 2 + l] *= o_scale;
 
-      } // q_head_i
-      if (kv_idx != num_iterations) {
-        last_seq_len = curr_iter_len;
-        cp_finished_seq_len += next_iter_len;
-        curr_iter_len = next_iter_len;
+        // update across local 4 threads
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+          #pragma unroll
+          for (int j = 0; j < 2; ++j) {
+            int idx = l * 2 + i * 4 + j;
+            // s_frag[idx] = expf(s_frag[idx] * sm_scale - m * sm_scale);
+            int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
+            int row = idx_in_warp / 4 + q_head_i * 16 + l * 8;
+            // 0 means exp(-inf)
+            
+            // Apply causal mask in softmax computation too
+            int q_token_idx_softmax = row / NUM_Q_HEADS;  // Which Q token (0 to EXTEND_NUM)
+            int q_token_pos_softmax = seq_len - 1 + q_token_idx_softmax;  // Absolute position of Q token
+            int k_cache_pos_softmax = kv_idx * KV_CHUNK_SIZE + col;  // Absolute position of K token
+            bool is_valid_softmax = (col < curr_iter_len) && (row < TOTAL_Q_VEC_NUM) && (k_cache_pos_softmax <= q_token_pos_softmax);
+            
+            s_frag[q_head_i][idx] = is_valid_softmax
+                              ? expf(s_frag[q_head_i][idx] * sm_scale - m[q_head_i * 2 + l] * sm_scale)
+                              : 0;
+            d_local += s_frag[q_head_i][idx];
+          }
+        }
+
+        // update o
+        // TODO: check if this is correct
+        #pragma unroll
+        for (int n = 0; n < 8; ++n) {
+          o[q_head_i][n][0 + 2 * l] *= o_scale;
+          o[q_head_i][n][1 + 2 * l] *= o_scale;
+          o[q_head_i][n][4 + 2 * l] *= o_scale;
+          o[q_head_i][n][5 + 2 * l] *= o_scale;
+        }
+        // sum the d across 4threads
+        d_local += shfl_xor_sync(d_local, 0X1);
+        d_local += shfl_xor_sync(d_local, 0X2);
+        d_sum[q_head_i * 2 + l] += d_local;
+      } // l
+
+      // //QK^T * V
+      uint32_t o_frag[4];
+      convert_f32_to_bf16_uint32(s_frag[q_head_i], o_frag);
+
+      for (int n = 0; n < 8; n++) {
+        int v_row = idx_in_warp % 16 + warp_idx * 16;
+        int v_col = idx_in_warp / 16 * 8 + n * 16;
+        bool is_valid_C = (v_row < curr_iter_len);
+        T *src_ptr_C =
+            is_valid_C ? v_cache_smem(v_row, v_col) : zero_buffer(0, 0);
+        ldsm_t(src_ptr_C, v_frag);
+        mma_m16n16k16_bf16bf16bf32(o[q_head_i][n], o_frag, v_frag, o[q_head_i][n]);
       }
+      __syncthreads();
+
+    } // q_head_i
+      
+    // Write back new K and V tokens in the current chunk to KV cache
+    
+    if (cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
+      #pragma unroll
+      for (int kv_cache_row = cur_chunk_new_kv_start; kv_cache_row < cur_chunk_new_kv_end; kv_cache_row++) {
+        #pragma unroll
+        for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
+          int col = i;
+          int smem_row = kv_cache_row - chunk_start; // relative position in the current chunk's smem
+          k_cache_dmem.at(kv_cache_row, col) = k_cache_smem.at(smem_row, col);
+          v_cache_dmem.at(kv_cache_row, col) = v_cache_smem.at(smem_row, col);
+        }
+      }
+    }
+    
+    if (kv_idx != num_iterations) {
+      last_seq_len = curr_iter_len;
+      cp_finished_seq_len += next_iter_len;
+      curr_iter_len = next_iter_len;
+    }
   } // kv_idx
 
   #pragma unroll
@@ -516,17 +540,20 @@ __device__ __forceinline__ void
             #pragma unroll
             for (uint32_t frag_idx = 0; frag_idx < 2; frag_idx++) {
               int osmem_offset = q_head_i * 2 * NUM_THREADS * 32 + l * NUM_THREADS * 32 + shmem_idx * 32 + n * 4 + frag_idx * 2;
-              int reg_idx = frag_idx * 4 + l * 2;
+              int reg_idx = frag_idx * 4 + l * 2; // 01 -> 45 --> 23 -> 67
               float o_new1 = o_smem[osmem_offset];
               float o_new2 = o_smem[osmem_offset + 1];
               o[q_head_i][n][reg_idx] = o[q_head_i][n][reg_idx] * expf(m_prev - m[q_head_i * 2 + l]) +
                                   o_new1 * expf(other_m - m[q_head_i * 2 + l]);
               o[q_head_i][n][reg_idx + 1] = o[q_head_i][n][reg_idx + 1] * expf(m_prev - m[q_head_i * 2 + l]) +
                                       o_new2 * expf(other_m - m[q_head_i * 2 + l]);
-            }
-          }
-        }
-      }
+              // if(q_head_i == 0 && n == 0) {
+              //   printf("[single_batch_extend_kernel] warp_id %d, frag_idx %d, l %d, reg_idx %d(&+1), o_new1 %f, o_new2 %f, o_prev1 %f, o_prev2 %f\n", warp_id, frag_idx, l, reg_idx, o_new1, o_new2, (float)o[q_head_i][n][reg_idx], (float)o[q_head_i][n][reg_idx + 1]);
+              // }
+            } // frag_idx
+          } // n
+        } // warp_id
+      } // only warp_idx == 0
       __syncthreads();
 
     }// l
@@ -549,8 +576,10 @@ __device__ __forceinline__ void
             if (row < TOTAL_Q_VEC_NUM) {
               output_smem.at(row, col) = bfloat16(o[q_head_i][n][i * 2] / d_sum[q_head_i * 2 + i % 2]);
               output_smem.at(row, col + 1) = bfloat16(o[q_head_i][n][i * 2 + 1] / d_sum[q_head_i * 2 + i % 2]);
+            } else {
+              output_smem.at(row, col) = bfloat16(0.0f);
+              output_smem.at(row, col + 1) = bfloat16(0.0f);
             }
-          // }
         }
       }
     }
@@ -565,26 +594,6 @@ __device__ __forceinline__ void
     int col = (i % 128);
     output_dmem.at(row, col) = output_smem.at(row, col);
   }
-
-  // // update KV cache
-  // #pragma unroll
-  // for (int row_new_kv = seq_len - 1; row_new_kv < seq_len + EXTEND_NUM; row_new_kv++) {
-  //   #pragma unroll
-  //   for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
-  //     int col = i;
-  //     k_cache_dmem.at(row_new_kv, col) = k_cache_smem.at(row_new_kv - (seq_len - 1), col);
-  //   }
-  // }
-
-  // #pragma unroll
-  // for (int row_new_kv = seq_len - 1; row_new_kv < seq_len + EXTEND_NUM; row_new_kv++) {
-  //   #pragma unroll
-  //   for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
-  //     int col = i;
-  //     v_cache_dmem.at(row_new_kv, col) = v_cache_smem.at(row_new_kv - (seq_len - 1), col);
-  //   }
-  // }
-
 }
 
 } // namespace kernel
