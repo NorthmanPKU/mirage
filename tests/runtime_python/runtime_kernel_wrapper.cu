@@ -1,6 +1,7 @@
 #include "argmax.cuh"
 #include "bfloat16.h"
 #include "linear.cuh"
+#include "multitoken_paged_attention.cuh"
 #include "norm.cuh"
 #include "norm_linear.cuh"
 // #include "norm_linear_original.cuh"
@@ -19,6 +20,7 @@
 
 // using kernel::argmax_kernel;
 using kernel::linear_kernel;
+using kernel::multitoken_paged_attention_task_impl;
 using kernel::norm_linear_task_impl;
 using kernel::paged_attention_task_impl;
 using kernel::silu_mul_linear_task_impl;
@@ -576,6 +578,184 @@ void paged_attention(
   }
 }
 
+// Multitoken Paged Attention
+
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_SEQ_LEN,
+          int MAX_TOKENS = 1>
+__global__ void multitoken_paged_attention_wrapper(
+    void const *qkv_ptr,
+    void *paged_k_cache_ptr,
+    void *paged_v_cache_ptr,
+    void *output_ptr,
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    int request_id,
+    bool qk_norm,
+    bool rope,
+    void const *q_norm_weight_ptr,
+    void const *k_norm_weight_ptr,
+    void const *cos_ptr,
+    void const *sin_ptr,
+    float q_eps,
+    float k_eps) {
+  multitoken_paged_attention_task_impl<T,
+                                       NUM_QO_HEADS,
+                                       NUM_KV_HEADS,
+                                       HEAD_DIM,
+                                       PAGE_SIZE,
+                                       MAX_SEQ_LEN,
+                                       MAX_TOKENS>(
+      qkv_ptr,
+      paged_k_cache_ptr,
+      paged_v_cache_ptr,
+      output_ptr,
+      qo_indptr_buffer_ptr,
+      paged_kv_indptr_buffer_ptr,
+      paged_kv_indices_buffer_ptr,
+      paged_kv_last_page_len_buffer_ptr,
+      request_id,
+      qk_norm,
+      rope,
+      q_norm_weight_ptr,
+      k_norm_weight_ptr,
+      cos_ptr,
+      sin_ptr,
+      q_eps,
+      k_eps);
+}
+
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_SEQ_LEN,
+          int MAX_TOKENS = 1>
+void launch_multitoken_paged_attention(
+    void const *qkv_ptr,
+    void *paged_k_cache_ptr,
+    void *paged_v_cache_ptr,
+    void *output_ptr,
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    int request_id,
+    bool qk_norm,
+    bool rope,
+    void const *q_norm_weight_ptr,
+    void const *k_norm_weight_ptr,
+    void const *cos_ptr,
+    void const *sin_ptr,
+    float q_eps,
+    float k_eps) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 112640;
+
+  cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
+                                                          NUM_QO_HEADS,
+                                                          NUM_KV_HEADS,
+                                                          HEAD_DIM,
+                                                          PAGE_SIZE,
+                                                          MAX_SEQ_LEN,
+                                                          MAX_TOKENS>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  multitoken_paged_attention_wrapper<T,
+                                     NUM_QO_HEADS,
+                                     NUM_KV_HEADS,
+                                     HEAD_DIM,
+                                     PAGE_SIZE,
+                                     MAX_SEQ_LEN,
+                                     MAX_TOKENS>
+      <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                           paged_k_cache_ptr,
+                                           paged_v_cache_ptr,
+                                           output_ptr,
+                                           qo_indptr_buffer_ptr,
+                                           paged_kv_indptr_buffer_ptr,
+                                           paged_kv_indices_buffer_ptr,
+                                           paged_kv_last_page_len_buffer_ptr,
+                                           request_id,
+                                           qk_norm,
+                                           rope,
+                                           q_norm_weight_ptr,
+                                           k_norm_weight_ptr,
+                                           cos_ptr,
+                                           sin_ptr,
+                                           q_eps,
+                                           k_eps);
+}
+
+void multitoken_paged_attention(
+    torch::Tensor qkv,
+    torch::Tensor paged_k_cache,
+    torch::Tensor paged_v_cache,
+    torch::Tensor output,
+    torch::Tensor qo_indptr_buffer,
+    torch::Tensor paged_kv_indptr_buffer,
+    torch::Tensor paged_kv_indices_buffer,
+    torch::Tensor paged_kv_last_page_len_buffer,
+    int request_id,
+    bool qk_norm,
+    bool rope,
+    torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> k_norm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> cos = torch::nullopt,
+    torch::optional<torch::Tensor> sin = torch::nullopt,
+    float q_eps = 0.0f,
+    float k_eps = 0.0f) {
+  void const *qkv_ptr = qkv.data_ptr();
+  void *paged_k_cache_ptr = paged_k_cache.data_ptr();
+  void *paged_v_cache_ptr = paged_v_cache.data_ptr();
+  void *output_ptr = output.data_ptr();
+  int const *qo_indptr_buffer_ptr = qo_indptr_buffer.data_ptr<int>();
+  int const *paged_kv_indptr_buffer_ptr =
+      paged_kv_indptr_buffer.data_ptr<int>();
+  int const *paged_kv_indices_buffer_ptr =
+      paged_kv_indices_buffer.data_ptr<int>();
+  int const *paged_kv_last_page_len_buffer_ptr =
+      paged_kv_last_page_len_buffer.data_ptr<int>();
+
+  void const *q_norm_weight_ptr = qk_norm ? q_norm_weight->data_ptr() : nullptr;
+  void const *k_norm_weight_ptr = qk_norm ? k_norm_weight->data_ptr() : nullptr;
+  void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
+
+  launch_multitoken_paged_attention<bfloat16, 4, 1, 128, 64, 512, 4>(
+      qkv_ptr,
+      paged_k_cache_ptr,
+      paged_v_cache_ptr,
+      output_ptr,
+      qo_indptr_buffer_ptr,
+      paged_kv_indptr_buffer_ptr,
+      paged_kv_indices_buffer_ptr,
+      paged_kv_last_page_len_buffer_ptr,
+      request_id,
+      qk_norm,
+      rope,
+      q_norm_weight_ptr,
+      k_norm_weight_ptr,
+      cos_ptr,
+      sin_ptr,
+      q_eps,
+      k_eps);
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
 // RMSNorm Linear
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -694,33 +874,45 @@ void norm_linear(torch::Tensor input,
 
 // Window RMSNorm Linear
 
-template <typename T, int BATCH_SIZE, int WINDOW_SIZE, int HEAD_DIM>
-__global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
-                                               void const *weight_ptr,
-                                               float eps,
-                                               void *output_ptr,
-                                               bool rotary_emd = false,
-                                               void const *cos_ptr = nullptr,
-                                               void const *sin_ptr = nullptr) {
-  constexpr size_t q_num = BATCH_SIZE * WINDOW_SIZE;
-  using Smem = kernel::smem_row<T, 3, 3, 3, q_num, 128, 128>;
+template <typename T,
+          int BATCH_SIZE,
+          int HEAD_NUM,
+          int WINDOW_SIZE,
+          int HEAD_DIM>
+__global__ void rms_norm_kernel_wrapper(void const *input_ptr,
+                                        void const *weight_ptr,
+                                        float eps,
+                                        void *output_ptr,
+                                        int token_offset = 0,
+                                        bool rotary_emd = false,
+                                        void const *cos_ptr = nullptr,
+                                        void const *sin_ptr = nullptr) {
+  // qk_num means either q_num or k_num, this wrapper function will test q and
+  // k in different arguments, if token_offset is 0, we test q, if it's not 0,
+  // we will test k.
+  assert(WINDOW_SIZE + token_offset <= 64); // should be lesser than a chunk.
+  static_assert(HEAD_NUM <= 8);
+  constexpr size_t qk_num = BATCH_SIZE * HEAD_NUM * WINDOW_SIZE;
+  constexpr size_t qk_max_num = BATCH_SIZE * HEAD_NUM * 64;
+  using Smem = kernel::smem_row<T, 3, 3, 3, qk_max_num, HEAD_DIM, HEAD_DIM>;
 
   extern __shared__ char smem[];
   T *smem_ptr = reinterpret_cast<T *>(smem);
   Smem input_smem(smem_ptr);
 
-  // TODO(Wenqin): q_num * HEAD_DIM is a conservative number.
-  float *reduce_smem = reinterpret_cast<float *>(smem) + q_num * HEAD_DIM;
+  float *reduce_smem = reinterpret_cast<float *>(smem) + qk_max_num * HEAD_DIM;
 
   T const *d_input = static_cast<T const *>(input_ptr);
   T *d_output = const_cast<T *>(static_cast<T const *>(output_ptr));
 
-  kernel::dmem_row_const<T, q_num, 128, 128> input_dmem(d_input);
-  kernel::dmem_row<T, q_num, 128, 128> output_dmem(d_output);
+  kernel::dmem_row_const<T, qk_max_num, HEAD_DIM, HEAD_DIM> input_dmem(d_input);
+  kernel::dmem_row<T, qk_num, HEAD_DIM, HEAD_DIM> output_dmem(d_output);
 
-  for (int i = threadIdx.x; i < q_num * (HEAD_DIM / 8); i += NUM_THREADS) {
-    int row = i / 16;
-    int col = (i % 16) * 8;
+  // vectorized load, 8 * sizeof(bf16) = 16 bytes = 128 bits
+  int const vec_per_head = (HEAD_DIM / 8);
+  for (int i = threadIdx.x; i < qk_max_num * vec_per_head; i += NUM_THREADS) {
+    int row = i / vec_per_head;
+    int col = (i % vec_per_head) * 8;
     kernel::load_smem(input_smem(row, col), input_dmem(row, col));
   }
   kernel::cp_async_fence();
@@ -734,44 +926,71 @@ __global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
   T const *rope_cos_ptr = static_cast<T const *>(cos_ptr);
   T const *rope_sin_ptr = static_cast<T const *>(sin_ptr);
 
-  kernel::window_rms_norm<T, Smem, 1, WINDOW_SIZE, HEAD_DIM>(input_smem,
+  kernel::rms_norm<T, Smem, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>(input_smem,
                                                              norm_weight_ptr,
                                                              reduce_smem,
                                                              eps,
+                                                             token_offset,
                                                              rotary_emd,
                                                              rope_cos_ptr,
                                                              rope_sin_ptr);
 
   __syncthreads();
 
-  for (int i = threadIdx.x; i < q_num * (HEAD_DIM / 8); i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < qk_num * vec_per_head; i += NUM_THREADS) {
     // write back
-    int row = i / 16;
-    int col = (i % 16) * 8;
+    int output_row = i / vec_per_head;
+    int input_row = output_row + token_offset;
+    int col = (i % vec_per_head) * 8;
     for (int j = 0; j < 8; j++) {
       int col_j = col + j;
-      *output_dmem(row, col_j) = *input_smem(row, col_j);
+      *output_dmem(output_row, col_j) = *input_smem(input_row, col_j);
     }
   }
 }
 
-#define WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE)                  \
-  launch_window_rms_norm<bfloat16, 1, WINDOW_SIZE, HEAD_DIM>(                  \
-      input_ptr, weight_ptr, eps, output_ptr, rotary_emd, cos_ptr, sin_ptr);
+#define WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE, HEAD_NUM)        \
+  launch_rms_norm<bfloat16, 1, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>(input_ptr,     \
+                                                                weight_ptr,    \
+                                                                eps,           \
+                                                                output_ptr,    \
+                                                                token_offset,  \
+                                                                rotary_emd,    \
+                                                                cos_ptr,       \
+                                                                sin_ptr);
+
+#define DISPATCH_WINDOW_RMSNORM_HEAD_NUM(HEAD_DIM, WINDOW_SIZE)                \
+  switch (head_num) {                                                          \
+    case 1:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE, 1);                \
+      break;                                                                   \
+    case 2:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE, 2);                \
+      break;                                                                   \
+    case 4:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE, 4);                \
+      break;                                                                   \
+    case 8:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE, 8);                \
+      break;                                                                   \
+    default:                                                                   \
+      printf("Unsupported head num in test: %zu\n", head_num);                 \
+      break;                                                                   \
+  }
 
 #define DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(HEAD_DIM)                   \
   switch (window_size) {                                                       \
     case 1:                                                                    \
-      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 1);                             \
+      DISPATCH_WINDOW_RMSNORM_HEAD_NUM(HEAD_DIM, 1);                           \
       break;                                                                   \
     case 2:                                                                    \
-      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 2);                             \
+      DISPATCH_WINDOW_RMSNORM_HEAD_NUM(HEAD_DIM, 2);                           \
       break;                                                                   \
     case 3:                                                                    \
-      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 3);                             \
+      DISPATCH_WINDOW_RMSNORM_HEAD_NUM(HEAD_DIM, 3);                           \
       break;                                                                   \
     case 4:                                                                    \
-      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 4);                             \
+      DISPATCH_WINDOW_RMSNORM_HEAD_NUM(HEAD_DIM, 4);                           \
       break;                                                                   \
     default:                                                                   \
       printf("Unsupported window size in test: %zu\n", window_size);           \
@@ -780,9 +999,6 @@ __global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
 
 #define DISPATCH_WINDOW_RMSNORM_LINEAR_HEAD_DIM()                              \
   switch (head_dim) {                                                          \
-    case 16:                                                                   \
-      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(16);                          \
-      break;                                                                   \
     case 32:                                                                   \
       DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(32);                          \
       break;                                                                   \
@@ -805,42 +1021,55 @@ __global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
 
 #define WINDOW_RMSNORM_LINEAR() DISPATCH_WINDOW_RMSNORM_LINEAR_HEAD_DIM()
 
-template <typename T, int BATCH_SIZE, int WINDOW_SIZE, int HEAD_DIM>
-void launch_window_rms_norm(void const *input_ptr,
-                            void const *weight_ptr,
-                            float eps,
-                            void *output_ptr,
-                            bool rotary_emd = false,
-                            void const *cos_ptr = nullptr,
-                            void const *sin_ptr = nullptr) {
+template <typename T,
+          int BATCH_SIZE,
+          int HEAD_NUM,
+          int WINDOW_SIZE,
+          int HEAD_DIM>
+void launch_rms_norm(void const *input_ptr,
+                     void const *weight_ptr,
+                     float eps,
+                     void *output_ptr,
+                     int token_offset = 0,
+                     bool rotary_emd = false,
+                     void const *cos_ptr = nullptr,
+                     void const *sin_ptr = nullptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
   size_t smem_size = 1024 * 99;
 
   cudaFuncSetAttribute(
-      window_rms_norm_kernel_wrapper<T, BATCH_SIZE, WINDOW_SIZE, HEAD_DIM>,
+      rms_norm_kernel_wrapper<T, BATCH_SIZE, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       smem_size);
 
-  window_rms_norm_kernel_wrapper<T, BATCH_SIZE, WINDOW_SIZE, HEAD_DIM>
-      <<<grid_dim, block_dim, smem_size>>>(
-          input_ptr, weight_ptr, eps, output_ptr, rotary_emd, cos_ptr, sin_ptr);
+  rms_norm_kernel_wrapper<T, BATCH_SIZE, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>
+      <<<grid_dim, block_dim, smem_size>>>(input_ptr,
+                                           weight_ptr,
+                                           eps,
+                                           output_ptr,
+                                           token_offset,
+                                           rotary_emd,
+                                           cos_ptr,
+                                           sin_ptr);
 }
 
-void window_rms_norm(
-    torch::Tensor input, // shape [batch, window_size, head_dim]
-    torch::Tensor weight,
-    float eps,
-    torch::Tensor output,
-    bool rotary_emd = false,
-    torch::optional<torch::Tensor> cos = c10::nullopt,
-    torch::optional<torch::Tensor> sin = c10::nullopt) {
+void rms_norm(torch::Tensor input, // shape [batch, window_size, head_dim]
+              torch::Tensor weight,
+              float eps,
+              torch::Tensor output,
+              int token_offset = 0,
+              bool rotary_emd = false,
+              torch::optional<torch::Tensor> cos = torch::nullopt,
+              torch::optional<torch::Tensor> sin = torch::nullopt) {
   void const *input_ptr = input.data_ptr();
   void const *weight_ptr = weight.data_ptr();
   void const *cos_ptr = cos ? cos->data_ptr() : nullptr;
   void const *sin_ptr = sin ? sin->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
-  size_t head_dim = output.size(2);
+  // heads from a same token be neighbors.
+  size_t head_dim = output.size(3);
+  size_t head_num = output.size(2);
   size_t window_size = output.size(1);
   auto dtype = input.dtype().toScalarType();
 
@@ -1286,5 +1515,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("q_norm_debug") = py::none(),
         py::arg("k_norm_debug") = py::none());
   m.def("paged_attention", &paged_attention, "Paged Attention");
-  m.def("window_rms_norm", &window_rms_norm, "Window RMSNorm");
+  m.def("multitoken_paged_attention",
+        &multitoken_paged_attention,
+        "Multitoken Paged Attention");
+  m.def("rms_norm", &rms_norm, "Window RMSNorm");
 }
