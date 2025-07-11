@@ -18,6 +18,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include "../runtime_header.h"
 
 constexpr int NUM_THREADS = 128;
 constexpr int NUM_THREADS_PER_WARP = 32;

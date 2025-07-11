@@ -20,6 +20,8 @@
 namespace mirage {
 namespace runtime {
 
+constexpr int MAX_SHARE_MEMORY_SIZE = 150 * 1024;
+
 typedef unsigned long long int TaskId;
 unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
 // Task IDs are 64-bit values encoding both the current iteration of the task
