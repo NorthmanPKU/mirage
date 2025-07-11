@@ -457,7 +457,7 @@ int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgra
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.step[0] + 1);");
+  code.e("    runtime_config.step[0]);");
   return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
 }
 
@@ -487,7 +487,7 @@ int TaskRegister::register_target_verify_greedy_task(threadblock::Graph const &b
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    (void*)&(runtime_config.new_token_num),"); // int pointer
-  code.e("    (void*)runtime_config.tokens + runtime_config.step[0] + 1);");
+  code.e("    (void*)(runtime_config.tokens + runtime_config.step[0] + 1));");
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
