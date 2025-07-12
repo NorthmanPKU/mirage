@@ -52,10 +52,22 @@ __device__ __forceinline__ void
   for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
     int64_t wordIdx = input_ids[batch_idx];
     if (wordIdx >= 0) {
+      // if (threadIdx.x == 0) {
+      //   printf("[embedding_kernel %d] wordIdx: %lld, reading from embedding[%lld](%p)\n", blockIdx.x, wordIdx, wordIdx * OUTPUT_DIM_SIZE, embedding + wordIdx * OUTPUT_DIM_SIZE);
+      // }
       #pragma unroll
       for (int i = threadIdx.x; i < CHUNK_SIZE; i += NUM_THREADS) {
         output[batch_idx * OUTPUT_DIM_SIZE + i] = embedding[wordIdx * OUTPUT_DIM_SIZE + i];
       }
+    } 
+    else {
+      // TODO: This might not be necessary
+      for (int i = threadIdx.x; i < CHUNK_SIZE; i += NUM_THREADS) { // writing 0 to output
+        output[batch_idx * OUTPUT_DIM_SIZE + i] = T(0.0f);
+      }
+      // if (threadIdx.x == 0) {
+      //   printf("[embedding_kernel %d] wordIdx: %lld, should be -1, writing 0. reading from input_ids[%d](%p)\n", blockIdx.x, wordIdx, batch_idx, input_ids + batch_idx);
+      // }
     }
   }
 }

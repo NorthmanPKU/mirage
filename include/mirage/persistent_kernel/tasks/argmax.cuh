@@ -84,7 +84,7 @@ __device__ __forceinline__ void
     T local_max = T(-inf);
     long long local_idx = -1;
     #pragma unroll
-    for (int i = tidx; i < CHUNK_SIZE; i += blockDim.x) {
+    for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
       T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
       if (val > local_max) {
         local_max = val;
@@ -118,7 +118,8 @@ __device__ __forceinline__ void
   T local_max = T(-inf);
   // Pack (chunk_index, relative_index) into a single 64-bit integer
   long long local_packed_idx = -1;
-
+  
+  #pragma unroll
   for (int i = tidx; i < NUM_PARTIAL_TASKS; i += blockDim.x) {
     T current_val = partial_vals[i];
     if (current_val > local_max) {
@@ -136,9 +137,11 @@ __device__ __forceinline__ void
       long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
       final_output[0] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
       tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
+      // printf("[argmax_reduce_kernel] tid: %d, final_output[0]: %lld, tokens[%d]: %lld\n", tidx, final_output[0], step + 1, tokens[step + 1]);
     } else {
       final_output[0] = -1;
       tokens[step + 1] = -1;
+      // printf("[argmax_reduce_kernel] tid: %d, final_output[0]: %lld, tokens[%d]: %lld, should all be -1\n", tidx, final_output[0], step + 1, tokens[step + 1]);
     }
   }
 }

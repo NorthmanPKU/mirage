@@ -6,6 +6,9 @@ import torch.distributed as dist
 import argparse
 import os
 
+# print limitation
+# torch.set_printoptions(threshold=2000)
+
 def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
@@ -47,8 +50,14 @@ if __name__ == "__main__":
         help="Ngram size for lookahead spec decode",
     )
     parser.add_argument(
+        "--max-seq-length",
+        default=512,
+        type=int,
+        help="Max sequence length for lookahead spec decode",
+    )
+    parser.add_argument(
         "--spec-length",
-        default=5,
+        default=3,
         type=int,
         help="Spec length for lookahead spec decode",
     )
@@ -100,7 +109,26 @@ if __name__ == "__main__":
     # get all model weight tensors
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
 
-    prompt = "Give me a short introduction to large language model."
+    # prompt = "Give me a short introduction to large language model."
+    # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
+    code_text = """import numpy as np
+                import matplotlib.pyplot as plt
+
+                # Calculate the average
+                average_throughput = np.mean(tokens_per_sec_arr)
+                print(f"Average Throughput: {average_throughput} tokens/sec")
+
+                # Plotting the histogram
+                plt.hist(tokens_per_sec_arr, bins=20, color='blue', edgecolor='black', alpha=0.7)
+                plt.title('Histogram of Throughput Values')
+                plt.xlabel('Tokens per Second')
+                plt.ylabel('Frequency')
+                plt.axvline(average_throughput, color='red', linestyle='dashed', linewidth=1)
+                plt.text(average_throughput*0.9, max(plt.ylim())*0.9, f'Average: {average_throughput:.2f}', color = 'red')
+                plt.show()
+                """
+    question = "Can you please change x axis to start from 0"
+    prompt = code_text + "\n" + question
     messages = [
         {
             "role": "system",
@@ -173,9 +201,9 @@ if __name__ == "__main__":
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
-            max_seq_length=512,
+            max_seq_length=args.max_seq_length,
             eos_token_id=model.config.eos_token_id,
-            meta_tensors=[step, tokens],
+            meta_tensors=[step, tokens, num_new_tokens],
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
         )
@@ -299,7 +327,8 @@ if __name__ == "__main__":
             output=y, 
             grid_dim=(max_factor_leq_n(4096, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
             # grid_dim=(1, 1, 1), 
-            block_dim=(128, 1, 1)
+            block_dim=(128, 1, 1),
+            input_source=(spec_decode_config is not None) # 0: all_tokens, 1: input_token (spec decoding)
         )
         x = y
         for i, layer in enumerate(model.model.layers):
@@ -478,7 +507,6 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         if spec_decode_config:
-            # TODO:(Jianan Ji) Align the output of argmax_reduce with the spec tokens
             verify_out = mpk.verify_layer_dispatcher(
                 spec_decode_config = spec_decode_config,
                 spec_tokens = spec_tokens,
@@ -559,14 +587,15 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, : step[0]]
+        generated_ids = tokens[:, : step[0] + 1]
+        # print(f"generated_ids: {generated_ids}")
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
 
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, step[0], run_time / (step[0] - warmup)
+                prompt_len, step[0] - prompt_len, run_time / (step[0] - prompt_len)
             )
         )
     if world_size > 1:
