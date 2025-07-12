@@ -34,6 +34,7 @@ template <typename T,
           int NUM_KV_HEADS,
           int HEAD_DIM,
           int WEIGHT_STRIDE,
+          int OUTPUT_STRIDE,
           int EXTEND_NUM>
 __device__ __forceinline__ void
     single_batch_extend_kernel(void const *qkv_ptr,
@@ -77,7 +78,7 @@ __device__ __forceinline__ void
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * NUM_Q_HEADS;
   const __restrict__ T *d_v =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
-  constexpr int NEW_QKVS_OFFSET = HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS);
+  constexpr int GLOBAL_QKVS_OFFSET = HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS) * 8;
   T __restrict__ *d_k_cache = static_cast<T *>(k_cache_ptr);
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
@@ -87,12 +88,16 @@ __device__ __forceinline__ void
   T *d_k_norm_debug = static_cast<T *>(k_norm_debug_ptr);
 
   // second & third parameter in the template is actually not used
-  dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, NEW_QKVS_OFFSET> q_dmem(d_q); // [4 * 128 * 2B]
-  dmem_row_const<T, 1, 128, NEW_QKVS_OFFSET> k_dmem(d_k); // [1 * 128 * 2B]
-  dmem_row_const<T, 1, 128, NEW_QKVS_OFFSET> v_dmem(d_v); // [1 * 128 * 2B]
-  dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> k_cache_dmem(d_k_cache);
-  dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> v_cache_dmem(d_v_cache);
-  dmem_row<T, TOTAL_Q_VEC_NUM, 128, 128> output_dmem(d_output); // [NUM_Q_HEADS * (EXTEND_NUM + 1) * 128 * 2B]
+  // dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, NEW_QKVS_OFFSET> q_dmem(d_q); // [4 * 128 * 2B]
+  // dmem_row_const<T, 1, HEAD_DIM, NEW_QKVS_OFFSET> k_dmem(d_k); // [1 * 128 * 2B]
+  // dmem_row_const<T, 1, HEAD_DIM, NEW_QKVS_OFFSET> v_dmem(d_v); // [1 * 128 * 2B]
+  // Actually the stride should be global stride which is 128 * 6 * 8 = 6144
+  dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, GLOBAL_QKVS_OFFSET> q_dmem(d_q);
+  dmem_row_const<T, 1, HEAD_DIM, GLOBAL_QKVS_OFFSET> k_dmem(d_k);
+  dmem_row_const<T, 1, HEAD_DIM, GLOBAL_QKVS_OFFSET> v_dmem(d_v);
+  dmem_row<T, MAX_SEQ_LEN, HEAD_DIM, WEIGHT_STRIDE> k_cache_dmem(d_k_cache);
+  dmem_row<T, MAX_SEQ_LEN, HEAD_DIM, WEIGHT_STRIDE> v_cache_dmem(d_v_cache);
+  dmem_row<T, TOTAL_Q_VEC_NUM, NUM_Q_HEADS * HEAD_DIM, OUTPUT_STRIDE> output_dmem(d_output); // [NUM_Q_HEADS * (EXTEND_NUM + 1) * 128 * 2B]
   
   // Debug tensor layouts (if enabled)
   // dmem_row<T, NUM_Q_HEADS, 128, (EXTEND_NUM + 1) * 128> q_norm_debug_dmem(d_q_norm_debug); // [NUM_Q_HEADS, EXTEND_NUM+1, HEAD_DIM]
@@ -588,11 +593,17 @@ __device__ __forceinline__ void
 
   // write output to device memory
   #pragma unroll
-  for (int i = threadIdx.x; i < (TOTAL_Q_VEC_NUM * 128); i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < (TOTAL_Q_VEC_NUM * HEAD_DIM); i += NUM_THREADS) {
     // offset
-    int row = i / 128;
-    int col = (i % 128);
-    output_dmem.at(row, col) = output_smem.at(row, col);
+    int smem_row = i / HEAD_DIM;  
+    int smem_col = i % HEAD_DIM;
+
+    int dmem_row = i / (NUM_Q_HEADS * HEAD_DIM);
+    int dmem_col = (i % (NUM_Q_HEADS * HEAD_DIM));
+    output_dmem.at(dmem_row, dmem_col) = output_smem.at(smem_row, smem_col);
+    // if(threadIdx.x == 0) {
+    //   printf("[single_batch_extend_kernel] writing output_smem.at(%d, %d) to output_dmem.at(%d, %d)\n", smem_row, smem_col, dmem_row, dmem_col);
+    // }
   }
 }
 
