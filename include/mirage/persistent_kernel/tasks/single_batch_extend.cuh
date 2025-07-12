@@ -312,32 +312,34 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    // q_norm
+    // Q norm - only execute in the first chunk (kv_idx == 0) since all Q tokens are loaded at once
     if (qk_norm && kv_idx == 0) {
-
-      window_rms_norm<T, QSmem, NUM_Q_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
+      rms_norm<T, QSmem, NUM_Q_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
           q_smem,
           static_cast<T const *>(qnorm_weight_ptr),
           qnorm_sum,
           q_eps,
+          0, // token_offset = 0 for Q tokens
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM, //TODO: check the index of cos and sin
+          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
           static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
     }
 
-    // TODO: Currently assume all new kvs are in the same last chunk
-    if (qk_norm && kv_idx == num_iterations - 1) {
-      for(int row_offset = curr_iter_len - EXTEND_NUM - 1; row_offset <= curr_iter_len - 1; row_offset++) {
-        int cur_id = row_offset - (curr_iter_len - EXTEND_NUM - 1) + seq_len - 1;
-        rms_norm<T, KSmem, NUM_KV_HEADS, HEAD_DIM>(
+    // K norm - only execute for chunks that contain new K tokens
+    if (qk_norm && cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
+      for (int kv_pos = cur_chunk_new_kv_start; kv_pos < cur_chunk_new_kv_end; kv_pos++) {
+
+        int token_offset_in_chunk = kv_pos - chunk_start;
+        
+        rms_norm<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
           k_cache_smem,
           static_cast<T const *>(knorm_weight_ptr),
           knorm_sum,
           k_eps,
-          row_offset,
+          token_offset_in_chunk,
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + cur_id * HEAD_DIM, //TODO: check the index of cos and sin
-          static_cast<T const *>(sin_ptr) + cur_id * HEAD_DIM
+          static_cast<T const *>(cos_ptr) + kv_pos * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + kv_pos * HEAD_DIM
           );
       }
     }
@@ -475,8 +477,10 @@ __device__ __forceinline__ void
     } // q_head_i
       
     // Write back new K and V tokens in the current chunk to KV cache
-    
     if (cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
+      // if(threadIdx.x == 0 && blockIdx.x == 0) {
+      //   printf("[single_batch_extend_kernel %d %d] writing kv_cache from %d to %d\n", blockIdx.x, threadIdx.x, cur_chunk_new_kv_start, cur_chunk_new_kv_end);
+      // }
       #pragma unroll
       for (int kv_cache_row = cur_chunk_new_kv_start; kv_cache_row < cur_chunk_new_kv_end; kv_cache_row++) {
         #pragma unroll
