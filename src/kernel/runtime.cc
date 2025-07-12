@@ -401,10 +401,10 @@ void register_mugraph(
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
             cur_task_map[bid] = all_tasks.size();
-            
+
             int offset = bid.x * bgraph.grid_dim.y * bgraph.grid_dim.z +
                          bid.y * bgraph.grid_dim.z + bid.z;
-            
+
             if (bid.x == 0 && bid.y == 0 && bid.z == 0) {
               first_tasks.push_back(all_tasks.size());
             }
@@ -1236,7 +1236,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
   task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
   task_type_to_name[TASK_TARGET_VERIFY_GREEDY] = "TASK_TARGET_VERIFY_GREEDY";
-  task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] = "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
+  task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] =
+      "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

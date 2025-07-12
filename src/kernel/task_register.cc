@@ -75,7 +75,10 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::embedding_kernel<bfloat16, $, $, $>(", batch_size, output_size, output_stride);
+  code.e("kernel::embedding_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         output_size,
+         output_stride);
   if (params[0] == 0) {
     code.e("    runtime_config.tokens + runtime_config.step[0], ");
   } else if (params[0] == 1) {
@@ -186,8 +189,8 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_ATTENTION_1, code.to_string());
 }
 
-int TaskRegister::register_single_batch_extend_attention_task(threadblock::Graph const &bgraph,
-                                          std::vector<int> const &params) {
+int TaskRegister::register_single_batch_extend_attention_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
   // params[2]: qk_norm
@@ -244,7 +247,8 @@ int TaskRegister::register_single_batch_extend_attention_task(threadblock::Graph
   code.e("    task_desc.inputs[6].base_ptr,");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
-  return register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION, code.to_string());
+  return register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION,
+                               code.to_string());
 }
 
 int TaskRegister::register_silu_mul_linear_with_residual_task(
@@ -360,7 +364,10 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $>(", batch_size, num_elements, num_partial_tasks);
+  code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         num_elements,
+         num_partial_tasks);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    task_desc.outputs[1].base_ptr);");
@@ -399,8 +406,8 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 
-int TaskRegister::register_find_ngram_partial_task(threadblock::Graph const &bgraph,
-                                                     std::vector<int> const &params) {
+int TaskRegister::register_find_ngram_partial_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: ngram size
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
@@ -431,8 +438,8 @@ int TaskRegister::register_find_ngram_partial_task(threadblock::Graph const &bgr
   return register_task_variant(TASK_FIND_NGRAM_PARTIAL, code.to_string());
 }
 
-int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgraph,
-                                                   std::vector<int> const &params) {
+int TaskRegister::register_find_ngram_global_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: ngram size
   // params[1]: spec length
   assert(params.size() == 2);
@@ -455,7 +462,10 @@ int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgra
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::find_ngram_global_kernel<$, $, $>(", params[0], params[1], num_parts);
+  code.e("kernel::find_ngram_global_kernel<$, $, $>(",
+         params[0],
+         params[1],
+         num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
@@ -463,8 +473,8 @@ int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgra
   return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
 }
 
-int TaskRegister::register_target_verify_greedy_task(threadblock::Graph const &bgraph,
-                                                     std::vector<int> const &params) {
+int TaskRegister::register_target_verify_greedy_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
