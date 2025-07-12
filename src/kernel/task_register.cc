@@ -486,7 +486,7 @@ int TaskRegister::register_target_verify_greedy_task(threadblock::Graph const &b
   code.e("kernel::target_verify_greedy_kernel<$>(", num_spec_tokens);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    (void*)&(runtime_config.new_token_num),"); // int pointer
+  code.e("    (void*)(runtime_config.new_token_nums),"); // int pointer
   code.e("    (void*)(runtime_config.tokens + runtime_config.step[0] + 1));");
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }

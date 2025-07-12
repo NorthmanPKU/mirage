@@ -126,6 +126,7 @@ if __name__ == "__main__":
         enable_timing=True
     )
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
+    num_new_tokens = torch.tensor([1], dtype=torch.int32, device="cuda")
     if args.use_mirage:
         import mirage as mi
 
@@ -405,6 +406,7 @@ if __name__ == "__main__":
             w_up_proj = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
+
             w_gatedup = mpk.fuse_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 fused_dim=0,
