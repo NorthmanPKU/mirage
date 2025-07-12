@@ -193,7 +193,8 @@ int TaskRegister::register_single_batch_extend_attention_task(threadblock::Graph
   // params[2]: qk_norm
   // params[3]: rotary_emd
   // params[4]: extend_num
-  assert(params.size() == 5);
+  // params[5]: output_stride
+  assert(params.size() == 6);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -215,19 +216,20 @@ int TaskRegister::register_single_batch_extend_attention_task(threadblock::Graph
   int extend_num = params[4];
   int head_dim = output_size / num_q_heads;
   int kv_stride = head_dim * num_kv_heads;
+  int output_stride = params[5];
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
   assert(input_ops[2]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
-
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::single_batch_extend_kernel<bfloat16, $, $, $, $, $>(",
+  code.e("kernel::single_batch_extend_kernel<bfloat16, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          head_dim,
          kv_stride,
+         output_stride,
          extend_num);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");

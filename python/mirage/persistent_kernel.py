@@ -361,8 +361,9 @@ class PersistentKernel:
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
-        num_q_heads = output.dim(1) // head_dim # 4
+        num_q_heads = output.dim(1) // head_dim # 32
         rotary_embed = 0
+        output_stride = output.dim(1)
 
         extend_num = input.dim(0) - 1
         if cos_pos_embed is not None or sin_pos_embed is not None:
@@ -384,7 +385,8 @@ class PersistentKernel:
         # params[2]: qk_norm
         # params[3]: rotary_embed
         # params[4]: extend_num
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, extend_num]
+        # params[5]: output_stride
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, extend_num, output_stride]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (0, 1, -1), -1, True)
@@ -531,11 +533,11 @@ class PersistentKernel:
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
         # Currently assume that input/output
-        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert input.num_dims == 2  # (batch_size, seq_len)
         assert output.num_dims == 2  # (batch_size, num_tasks)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "find_ngram_partial", [ngram_size])
         
