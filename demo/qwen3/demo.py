@@ -17,6 +17,8 @@ def grid_for_rmsnorm_linear_layer(size):
     elif size % 64 == 0:
         return 64
     
+# Return the largest factor of m that is less than or equal to n
+# This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
     max_factor = 1
     i = 1
@@ -216,6 +218,9 @@ if __name__ == "__main__":
             argmax_batch_size = batch_size
             num_tokens_extend = 1
         total_tokens_per_iter = batch_size * num_tokens_extend
+        
+        # TODO: Make the code run well even if 96 % total_tokens_per_iter != 0
+        assert(96 % total_tokens_per_iter == 0)
         
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
@@ -489,7 +494,9 @@ if __name__ == "__main__":
         )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (96 // (spec_decode_config.spec_length + 1), spec_decode_config.spec_length + 1, 1)
+            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
+                                       spec_decode_config.spec_length + 1, 
+                                       1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
             argmax_partial_grid_dim = (96, 1, 1)

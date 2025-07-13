@@ -17,7 +17,6 @@
 #include <climits>
 
 namespace kernel {
-// TODO:(Jianan Ji) These could be further merged as one?
 // Find the first n-gram in the sequence
 template <int NGRAM_SIZE, int NUM_WORKERS>
 static __device__ __forceinline__ void 
@@ -44,8 +43,6 @@ static __device__ __forceinline__ void
   }
   __syncthreads();
   if (t_id < NGRAM_SIZE) {
-    // printf("[find_ngram_partial_kernel] t_id: %d, task_id: %d, reading from ngram_id_ptr[%d] which is actually %d\n", t_id, task_id, t_id, t_id + input_token_num - NGRAM_SIZE);
-    // printf("[find_ngram_partial_kernel] t_id: %d, task_id: %d, ngram_id_ptr[%d]: %lld\n", t_id, task_id, t_id, ngram_id_ptr[t_id]);
     ngram[t_id] = ngram_id_ptr[t_id];
   }
 
@@ -54,9 +51,6 @@ static __device__ __forceinline__ void
   int elements_per_iteration = NUM_WORKERS * NUM_THREADS;
   
   for (int iteration = 0; iteration * elements_per_iteration < total_elements && block_min_idx == LLONG_MAX; iteration++) {
-    // if (t_id == 0) {
-    //   printf("[find_ngram_partial_kernel] t_id: %d, task_id: %d, iteration: %d, elements_per_iteration: %d, total_elements: %d\n", t_id, task_id, iteration, elements_per_iteration, total_elements);
-    // }
     int idx = t_id + task_id * NUM_THREADS + iteration * elements_per_iteration;
     
     // Load input tokens into shared memory - only if idx is valid
@@ -70,18 +64,6 @@ static __device__ __forceinline__ void
       }
     }
     __syncthreads();
-    // if (t_id == 0 && blockIdx.x == 0) {
-    //   printf("[find_ngram_partial_kernel] ngram: ");
-    //   for (int i = 0; i < NGRAM_SIZE; i++) {
-    //     printf("%lld ", ngram[i]);
-    //   }
-    //   printf("\n");
-    //   printf("[find_ngram_partial_kernel] input_tokens: ");
-    //   for (int i = 0; i < NUM_THREADS + NGRAM_SIZE - 1; i++) {
-    //     printf("%lld ", input_tokens[i]);
-    //   }
-    //   printf("\n");
-    // }
 
     // Each thread checks if an n-gram starts at its position
     bool is_ngram = false;
@@ -105,7 +87,6 @@ static __device__ __forceinline__ void
   // After the loop, thread 0 writes the block's result to the global output
   if (t_id == 0) {
     output[0] = block_min_idx;
-    // printf("[find_ngram_partial_kernel] task_id: %d, tid: %d, write block_min_idx = %lld to output[0] = %lld, output_ptr = %p\n", task_id, t_id, block_min_idx, output[0], output);
   }
 }
 
@@ -138,16 +119,13 @@ find_ngram_global_kernel(void const *__restrict__ _input_array,
     __syncthreads();
     if (t_id == 32) {
       output_result[0] = tokens_ptr[step];
-      // printf("[find_ngram_global_kernel] writing output_result[0] = %lld\n", tokens_ptr[step]);
     }
     else if (t_id < SPEC_LENGTH) {
         int spec_token_idx = block_min_idx_shared + NGRAM_SIZE + t_id;
         if (block_min_idx_shared != LLONG_MAX && spec_token_idx <= step) {
             output_result[t_id + 1] = tokens_ptr[spec_token_idx];
-            // printf("[find_ngram_global_kernel] writing output_result[%d](%p) = %lld, because block_min_idx_shared = %lld, spec_token_idx = %d, step = %d\n", t_id + 1, output_result + t_id + 1, tokens_ptr[spec_token_idx], block_min_idx_shared, spec_token_idx, step);
         } else {
             output_result[t_id + 1] = -1;
-            // printf("[find_ngram_global_kernel] writing output_result[%d](%p) = -1, because block_min_idx_shared = %lld, spec_token_idx = %d, step = %d\n", t_id + 1, output_result + t_id + 1, block_min_idx_shared, spec_token_idx, step);
         }
     }
 }

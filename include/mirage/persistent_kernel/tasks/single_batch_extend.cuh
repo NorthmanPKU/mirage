@@ -58,7 +58,6 @@ __device__ __forceinline__ void
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
   float const sm_scale = (1.f / sqrt((float)HEAD_DIM));
-  // float const sm_scale = 1.f;
 
   int warp_idx = warp_id();
   int idx_in_warp = threadIdx.x % 32;
@@ -88,10 +87,6 @@ __device__ __forceinline__ void
   T *d_k_norm_debug = static_cast<T *>(k_norm_debug_ptr);
 
   // second & third parameter in the template is actually not used
-  // dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, NEW_QKVS_OFFSET> q_dmem(d_q); // [4 * 128 * 2B]
-  // dmem_row_const<T, 1, HEAD_DIM, NEW_QKVS_OFFSET> k_dmem(d_k); // [1 * 128 * 2B]
-  // dmem_row_const<T, 1, HEAD_DIM, NEW_QKVS_OFFSET> v_dmem(d_v); // [1 * 128 * 2B]
-  // Actually the stride should be global stride which is 128 * 6 * 8 = 6144
   dmem_row_const<T, NUM_Q_HEADS, NUM_Q_HEADS * 128, GLOBAL_QKVS_OFFSET> q_dmem(d_q);
   dmem_row_const<T, 1, HEAD_DIM, GLOBAL_QKVS_OFFSET> k_dmem(d_k);
   dmem_row_const<T, 1, HEAD_DIM, GLOBAL_QKVS_OFFSET> v_dmem(d_v);
@@ -114,8 +109,8 @@ __device__ __forceinline__ void
   constexpr size_t SHARED_V_BUFFER_OFFSET = SHARED_V_OFFSET + KV_CHUNK_SIZE * HEAD_DIM * sizeof(T);
   
   constexpr size_t D_OFFSET = SHARED_V_BUFFER_OFFSET + KV_CHUNK_SIZE * HEAD_DIM * sizeof(T);
-  constexpr size_t MAX_OFFSET = D_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * sizeof(float); // TODO: check
-  constexpr size_t O_OFFSET = MAX_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * sizeof(float); // TODO: check
+  constexpr size_t MAX_OFFSET = D_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * sizeof(float);
+  constexpr size_t O_OFFSET = MAX_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * sizeof(float);
 
   constexpr size_t Q_NORM_SUM_OFFSET = O_OFFSET + NUM_Q_TOKEN_DIM_ITER * 2 * NUM_THREADS * 4/*0 1 4 5 for t0*/ * 8/* 8 iter along hidden dim */ * sizeof(float); // TODO: check
   constexpr size_t K_NORM_SUM_OFFSET = Q_NORM_SUM_OFFSET + NUM_WARPS * sizeof(float);
@@ -215,7 +210,6 @@ __device__ __forceinline__ void
   cp_async_fence();
 
   // metadata for flashattention
-  // TODO: check if this is enough
   float o[NUM_Q_TOKEN_DIM_ITER][8][8];
   #pragma unroll
   for (int q_head_i = 0; q_head_i < NUM_Q_TOKEN_DIM_ITER; q_head_i++) {
@@ -445,7 +439,6 @@ __device__ __forceinline__ void
         }
 
         // update o
-        // TODO: check if this is correct
         #pragma unroll
         for (int n = 0; n < 8; ++n) {
           o[q_head_i][n][0 + 2 * l] *= o_scale;
@@ -478,9 +471,6 @@ __device__ __forceinline__ void
       
     // Write back new K and V tokens in the current chunk to KV cache
     if (cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
-      // if(threadIdx.x == 0 && blockIdx.x == 0) {
-      //   printf("[single_batch_extend_kernel %d %d] writing kv_cache from %d to %d\n", blockIdx.x, threadIdx.x, cur_chunk_new_kv_start, cur_chunk_new_kv_end);
-      // }
       #pragma unroll
       for (int kv_cache_row = cur_chunk_new_kv_start; kv_cache_row < cur_chunk_new_kv_end; kv_cache_row++) {
         #pragma unroll
@@ -510,8 +500,6 @@ __device__ __forceinline__ void
         #pragma unroll
         for (int i = 0; i < 2; i++) { // (0 1) or (4 5)
           int reg_idx = l * 2 + i * 4; // 0, 1, 4, 5 / 2, 3, 6, 7
-          // o_smem[q_head_i][l][threadIdx.x * 32 + n * 4 + i * 2] = o[q_head_i][n][reg_idx];
-          // o_smem[q_head_i][l][threadIdx.x * 32 + n * 4 + i * 2 + 1] = o[q_head_i][n][reg_idx + 1];
           int osmem_offset = q_head_i * 2 * NUM_THREADS * 32 + l * NUM_THREADS * 32 + threadIdx.x * 32 + n * 4 + i * 2;
           // 0&1 / 4&5 / 2&3 / 6&7
           o_smem[osmem_offset] = o[q_head_i][n][reg_idx];
@@ -528,7 +516,6 @@ __device__ __forceinline__ void
       d_sum[q_head_i * 2 + l] = 1.f;
 
       if (warp_idx == 0) {
-        // TODO: 0 is not needed
         // Reduce across 4 warps
         #pragma unroll
         for (uint32_t warp_id = 0; warp_id < 4; warp_id++) {
@@ -556,9 +543,6 @@ __device__ __forceinline__ void
                                   o_new1 * expf(other_m - m[q_head_i * 2 + l]);
               o[q_head_i][n][reg_idx + 1] = o[q_head_i][n][reg_idx + 1] * expf(m_prev - m[q_head_i * 2 + l]) +
                                       o_new2 * expf(other_m - m[q_head_i * 2 + l]);
-              // if(q_head_i == 0 && n == 0) {
-              //   printf("[single_batch_extend_kernel] warp_id %d, frag_idx %d, l %d, reg_idx %d(&+1), o_new1 %f, o_new2 %f, o_prev1 %f, o_prev2 %f\n", warp_id, frag_idx, l, reg_idx, o_new1, o_new2, (float)o[q_head_i][n][reg_idx], (float)o[q_head_i][n][reg_idx + 1]);
-              // }
             } // frag_idx
           } // n
         } // warp_id
@@ -605,9 +589,6 @@ __device__ __forceinline__ void
     int dmem_row = i / (NUM_Q_HEADS * HEAD_DIM);
     int dmem_col = (i % (NUM_Q_HEADS * HEAD_DIM));
     output_dmem.at(dmem_row, dmem_col) = output_smem.at(smem_row, smem_col);
-    // if(threadIdx.x == 0) {
-    //   printf("[single_batch_extend_kernel] writing output_smem.at(%d, %d) to output_dmem.at(%d, %d)\n", smem_row, smem_col, dmem_row, dmem_col);
-    // }
   }
 }
 

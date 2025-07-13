@@ -78,7 +78,7 @@ __global__ void init_kernel(RuntimeConfig config) {
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  if (config.verbose || config.new_token_nums[0] > 1) {
+  if (config.verbose) {
     printf("step: %d, new_token_num(%p): %d, new_token_ids:\n", step, config.new_token_nums, config.new_token_nums[0]);
     for (int i = 0; i < config.new_token_nums[0]; i++) {
       printf("%lld ", config.tokens[step + 1 + i]);
@@ -800,13 +800,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(all_tasks, all_events, first_tasks, npes, mype);
-  // for (size_t i = 0; i < all_tasks.size(); i++) {
-  //   printf(
-  //       "task[%zu]: task_type(%d) trigger_event(%llx)
-  //       dependent_event(%llx)\n", i, all_tasks[i].task_type,
-  //       all_tasks[i].trigger_event,
-  //       all_tasks[i].dependent_event);
-  // }
 
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue

@@ -43,7 +43,7 @@ __device__ __forceinline__ void
 
 template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>
 static __device__ __forceinline__ void
-    mul_broadcast_row(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1, bool print_sign = false) {
+    mul_broadcast_row(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1) {
   // Broadcast src1 (single row) across all rows of src0
   // src0: [BATCH_SIZE, TILE_SIZE], src1: [1, TILE_SIZE]
   // dst = src0 * broadcast(src1)
@@ -53,9 +53,6 @@ static __device__ __forceinline__ void
     int col = elem_idx % SMEM_DST::COL;
     int row = elem_idx / SMEM_DST::COL;
     dst.at(row, col) = src0.at(row, col) * src1.at(0, col);
-    // if (print_sign) {
-    //   printf("mul_broadcast_row: elem_idx:%d / %d src0(%d, %d): %f, src1(%d, %d): %f => %f\n", (int)elem_idx, (int)SMEM_DST::size(), (int)row, (int)col, (float)(src0.at(row, col)), 0, (int)col, (float)(src1.at(0, col)), (float)(dst.at(row, col)));
-    // }
   }
 }
 } // namespace kernel

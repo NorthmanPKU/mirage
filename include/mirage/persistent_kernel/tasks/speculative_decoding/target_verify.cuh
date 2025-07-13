@@ -32,8 +32,6 @@ __device__ __forceinline__ void
     __shared__ int local_accepted_num_smem;
 
     if (t_id == 0) {
-        // printf("[target_verify_greedy_kernel]   spec_token_id: %lld, %lld, %lld, %lld, %lld, %lld\n", spec_token_id[0], spec_token_id[1], spec_token_id[2], spec_token_id[3], spec_token_id[4], spec_token_id[5]);
-        // printf("[target_verify_greedy_kernel] target_token_id: %lld, %lld, %lld, %lld, %lld, %lld\n", target_token_id[0], target_token_id[1], target_token_id[2], target_token_id[3], target_token_id[4], target_token_id[5]);
         int accepted_count = NUM_SPEC_TOKENS;
         for(int i = 0; i < NUM_SPEC_TOKENS; i++) {
             // spec_token_id[0] is original token, [1...NUM_SPEC_TOKENS] are speculative ones.
@@ -51,12 +49,10 @@ __device__ __forceinline__ void
     // Copy the newly accepted tokens and the first non-matching target token.
     if (t_id < final_accepted_count + 1) {
         new_tokens[t_id] = target_token_id[t_id];
-        // printf("[target_verify_greedy_kernel] tid: %d, new_tokens[%d]: %lld, target_token_id[%d]: %lld\n", t_id, t_id, new_tokens[t_id], t_id, target_token_id[t_id]);
     }
 
     if (t_id == NUM_THREADS_PER_WARP) {
         new_accepted_len[0] = final_accepted_count + 1;
-        // printf("[target_verify_greedy_kernel] tid: %d, new_accepted_len[0](%p): %d, new_accepted_len_ptr: %p, new_accepted_len: %p\n", t_id, &(new_accepted_len[0]), new_accepted_len[0], new_accepted_len_ptr, new_accepted_len);
     }
 }
 

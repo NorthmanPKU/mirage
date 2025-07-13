@@ -136,12 +136,6 @@ __device__ __forceinline__ void
       sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE;
   // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
-  // if (threadIdx.x == 0) {
-  //   int const smem_size =
-  //       SHARED_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
-  //   printf("smem size of silu_mul %d\n", smem_size);
-  // }
-
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
   *((__uint128_t *)zero_buf) = 0ul;
