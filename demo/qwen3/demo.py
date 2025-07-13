@@ -581,7 +581,7 @@ if __name__ == "__main__":
         starter.record()
 
         step.fill_(prompt_len)
-        mpk(output_dir="output")
+        mpk()
 
         ender.record()
         torch.cuda.synchronize()

@@ -232,7 +232,6 @@ __global__ void single_batch_extend_wrapper(void const *qkv_ptr,
                                             float k_eps,
                                             void *q_norm_debug_ptr,
                                             void *k_norm_debug_ptr) {
-  printf("single_batch_extend_kernel<%d, %d, %d, %d, %d>\n", NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, EXTEND_NUM);
   single_batch_extend_kernel<T,
                              NUM_Q_HEADS,
                              NUM_KV_HEADS,

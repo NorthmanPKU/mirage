@@ -53,7 +53,7 @@ static __device__ __forceinline__ void
   int total_elements = input_token_num - NGRAM_SIZE;
   int elements_per_iteration = NUM_WORKERS * NUM_THREADS;
   
-  for (int iteration = 0; iteration * elements_per_iteration < total_elements && block_min_idx == LONG_MAX; iteration++) {
+  for (int iteration = 0; iteration * elements_per_iteration < total_elements && block_min_idx == LLONG_MAX; iteration++) {
     // if (t_id == 0) {
     //   printf("[find_ngram_partial_kernel] t_id: %d, task_id: %d, iteration: %d, elements_per_iteration: %d, total_elements: %d\n", t_id, task_id, iteration, elements_per_iteration, total_elements);
     // }
