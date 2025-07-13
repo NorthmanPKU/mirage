@@ -19,10 +19,10 @@ namespace kernel {
 template <typename T, int OUT_DIM>
 __device__ __forceinline__ void
     single_embedding_kernel(void const *__restrict__ input_ptr,
-                     void const *__restrict__ embedding_ptr,
-                     void *__restrict__ output_ptr,
-                     int step,
-                     long long *tokens) {
+                            void const *__restrict__ embedding_ptr,
+                            void *__restrict__ output_ptr,
+                            int step,
+                            long long *tokens) {
   // int64_t const *__restrict__ input_ids =
   //     static_cast<int64_t const *>(input_ptr);
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
@@ -47,19 +47,20 @@ __device__ __forceinline__ void
       static_cast<int64_t const *>(input_ptr);
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
   T *__restrict__ output = static_cast<T *>(output_ptr);
-  
-  #pragma unroll
+
+#pragma unroll
   for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
     int64_t wordIdx = input_ids[batch_idx];
     if (wordIdx >= 0) {
-      #pragma unroll
+#pragma unroll
       for (int i = threadIdx.x; i < CHUNK_SIZE; i += NUM_THREADS) {
-        output[batch_idx * OUTPUT_DIM_SIZE + i] = embedding[wordIdx * OUTPUT_DIM_SIZE + i];
+        output[batch_idx * OUTPUT_DIM_SIZE + i] =
+            embedding[wordIdx * OUTPUT_DIM_SIZE + i];
       }
-    } 
-    else {
+    } else {
       // TODO: This might not be necessary
-      for (int i = threadIdx.x; i < CHUNK_SIZE; i += NUM_THREADS) { // writing 0 to output
+      for (int i = threadIdx.x; i < CHUNK_SIZE;
+           i += NUM_THREADS) { // writing 0 to output
         output[batch_idx * OUTPUT_DIM_SIZE + i] = T(0.0f);
       }
     }

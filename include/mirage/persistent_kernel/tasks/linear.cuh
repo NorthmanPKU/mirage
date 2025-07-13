@@ -316,13 +316,14 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       __syncthreads();
     }
 
-  #pragma unroll
+#pragma unroll
     for (int row = 0; row < BATCH_SIZE; row++) {
-      #pragma unroll
+#pragma unroll
       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
         T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
                                 : mm_intermediate_smem.at(row, i);
-        output_dmem.at(row, i) = residual ? val + residual_smem.at(row, i) : val;
+        output_dmem.at(row, i) =
+            residual ? val + residual_smem.at(row, i) : val;
       }
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {

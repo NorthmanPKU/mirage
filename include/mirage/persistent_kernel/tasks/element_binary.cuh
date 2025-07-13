@@ -47,7 +47,7 @@ static __device__ __forceinline__ void
   // Broadcast src1 (single row) across all rows of src0
   // src0: [BATCH_SIZE, TILE_SIZE], src1: [1, TILE_SIZE]
   // dst = src0 * broadcast(src1)
-  
+
   for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
        elem_idx += NUM_THREADS) {
     int col = elem_idx % SMEM_DST::COL;

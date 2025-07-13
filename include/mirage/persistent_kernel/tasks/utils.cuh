@@ -22,12 +22,14 @@ constexpr int log2_constexpr(int n, int p = 0) {
 }
 
 constexpr int max_power_of_two_le(int x) {
-    if (x <= 0) return 0;
-    int result = 1;
-    while ((result << 1) <= x) {
-        result <<= 1;
-    }
-    return result;
+  if (x <= 0) {
+    return 0;
+  }
+  int result = 1;
+  while ((result << 1) <= x) {
+    result <<= 1;
+  }
+  return result;
 }
 
 __device__ __forceinline__ void

@@ -43,11 +43,13 @@ __device__ __forceinline__ void
 
   // TODO: Update the formula since norm weight is cut down
   constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
-    (mirage::runtime::MAX_SHARE_MEMORY_SIZE - 16 - 16898 * BATCH_SIZE) / (4 * (128 + BATCH_SIZE))
-  );
+      (mirage::runtime::MAX_SHARE_MEMORY_SIZE - 16 - 16898 * BATCH_SIZE) /
+      (4 * (128 + BATCH_SIZE)));
 
   constexpr int OUTPUT_LIMIT = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE ? OUTPUT_LIMIT : MAX_OUTPUT_ATOM_SIZE;
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE
+                                       ? OUTPUT_LIMIT
+                                       : MAX_OUTPUT_ATOM_SIZE;
 
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
   constexpr int TILE_SIZE = 128;
@@ -68,7 +70,8 @@ __device__ __forceinline__ void
       OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
 
-  constexpr int NUM_ITERS_M = 1; //TODO: Batch size more than 16 will cause error
+  constexpr int NUM_ITERS_M =
+      1; // TODO: Batch size more than 16 will cause error
   constexpr int NUM_ITERS_N = OUTPUT_ATOM_SIZE / NUM_WARPS_N / 16;
   constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
 
@@ -85,7 +88,8 @@ __device__ __forceinline__ void
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  using InputDmem = dmem_row_const<T, BATCH_SIZE, REDUCTION_SIZE, REDUCTION_SIZE>;
+  using InputDmem =
+      dmem_row_const<T, BATCH_SIZE, REDUCTION_SIZE, REDUCTION_SIZE>;
   using NormWeightDmem = dmem_row_const<T, 1, REDUCTION_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
@@ -112,8 +116,7 @@ __device__ __forceinline__ void
   // sizeof(T) * REDUCTION_SIZE
 
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
-      SHARED_NORM_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * FORLOOP_RANGE * TILE_SIZE;
+      SHARED_NORM_WEIGHT_BUFFER_OFFSET + sizeof(T) * FORLOOP_RANGE * TILE_SIZE;
   // sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t MUL_OUTPUT_OFFSET =
@@ -167,7 +170,13 @@ __device__ __forceinline__ void
   using NormWeightSmem = smem_row<T, 0, 0, 0, 1, TILE_SIZE, TILE_SIZE>;
   using InputBufferSmem =
       smem_row<T, 0, 0, 0, FORLOOP_RANGE * BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
-  using NormWeightBufferSmem = smem_row<T, 0, 0, 0, 1, FORLOOP_RANGE * TILE_SIZE, FORLOOP_RANGE * TILE_SIZE>;
+  using NormWeightBufferSmem = smem_row<T,
+                                        0,
+                                        0,
+                                        0,
+                                        1,
+                                        FORLOOP_RANGE * TILE_SIZE,
+                                        FORLOOP_RANGE * TILE_SIZE>;
   using WeightSmem =
       smem_col<T, 3, 3, 3, TILE_SIZE, OUTPUT_ATOM_SIZE, TILE_SIZE>;
   using WeightBufferSmem =
@@ -215,16 +224,21 @@ __device__ __forceinline__ void
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
           int input_src_row = i >> log2_CHUNKS_PER_ROW_A;
-          int input_dst_row = input_src_row + (k_pipe * BATCH_SIZE);  // Batch size may not be power of 2
+          int input_dst_row =
+              input_src_row +
+              (k_pipe * BATCH_SIZE); // Batch size may not be power of 2
           int input_dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-          int input_src_col = input_dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
+          int input_src_col =
+              input_dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
 
-          int norm_weight_col = input_dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
+          int norm_weight_col =
+              input_dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
           load_smem(input_buffer_smem(input_dst_row, input_dst_col),
                     input_dmem(input_src_row, input_src_col));
-          if (input_src_row == 0)
+          if (input_src_row == 0) {
             load_smem(norm_weight_buffer_smem(0, input_dst_col),
                       norm_weight_dmem(0, norm_weight_col));
+          }
         }
       }
 #pragma unroll
@@ -242,9 +256,9 @@ __device__ __forceinline__ void
 
     // accumulator
     float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
-    #pragma unroll
+#pragma unroll
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
-      #pragma unroll
+#pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
         clear_8_floats(s_frag[m][n]);
       }
@@ -257,18 +271,21 @@ __device__ __forceinline__ void
 #pragma unroll
           for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
             int input_src_row = i >> log2_CHUNKS_PER_ROW_A;
-            int input_dst_row = input_src_row + ((for_idx + K_PIPE_MAX - 1) * BATCH_SIZE);
+            int input_dst_row =
+                input_src_row + ((for_idx + K_PIPE_MAX - 1) * BATCH_SIZE);
             int input_dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
             int input_src_col = input_dst_col + ((for_idx + K_PIPE_MAX - 1)
-                                     << log2_constexpr(TILE_SIZE));
+                                                 << log2_constexpr(TILE_SIZE));
             load_smem(input_buffer_smem(input_dst_row, input_dst_col),
                       input_dmem(input_src_row, input_src_col));
 
-            int norm_weight_col = input_dst_col + ((for_idx + K_PIPE_MAX - 1)
-                                     << log2_constexpr(TILE_SIZE));
-            if (input_src_row == 0)
+            int norm_weight_col =
+                input_dst_col +
+                ((for_idx + K_PIPE_MAX - 1) << log2_constexpr(TILE_SIZE));
+            if (input_src_row == 0) {
               load_smem(norm_weight_buffer_smem(0, norm_weight_col),
                         norm_weight_dmem(0, norm_weight_col));
+            }
           }
         }
 #pragma unroll
@@ -289,8 +306,7 @@ __device__ __forceinline__ void
       // rotate the buffers
       input_smem.set_ptr(shared_input_buffer +
                          BATCH_SIZE * TILE_SIZE * for_idx);
-      norm_weight_smem.set_ptr(shared_norm_weight_buffer +
-                               TILE_SIZE * for_idx);
+      norm_weight_smem.set_ptr(shared_norm_weight_buffer + TILE_SIZE * for_idx);
       weight_buffer_smem.set_ptr(shared_weight_buffer +
                                  TILE_SIZE * OUTPUT_ATOM_SIZE *
                                      ((for_idx + 1) % K_PIPE_MAX));
@@ -385,7 +401,7 @@ __device__ __forceinline__ void
 
 #pragma unroll
     for (int row = 0; row < BATCH_SIZE; row++) {
-      #pragma unroll
+#pragma unroll
       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
         output_dmem.at(row, i) = output_smem.at(row, i);
       }
