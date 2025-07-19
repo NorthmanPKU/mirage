@@ -55,16 +55,6 @@ __device__ __forceinline__ void
       OUTPUT_SIZE / OUTPUT_ATOM_SIZE; // Full output atoms
   constexpr int LAST_OUTPUT_ATOM_SIZE = OUTPUT_SIZE % OUTPUT_ATOM_SIZE;
 
-  // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
-  constexpr int NUM_WARPS_N =
-      OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
-  constexpr int LAST_NUM_WARPS_N =
-      LAST_OUTPUT_ATOM_SIZE / 16 <= 4 ? LAST_OUTPUT_ATOM_SIZE / 16 : 4;
-
-  constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
-  constexpr int LAST_NUM_WARPS_K =
-      (LAST_NUM_WARPS_N == 0) ? 0 : (4 / LAST_NUM_WARPS_N);
-
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
   assert(REDUCTION_SIZE % TILE_SIZE == 0);
@@ -78,6 +68,15 @@ __device__ __forceinline__ void
   constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
   constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
 
+  // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
+  constexpr int NUM_WARPS_N =
+      OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
+  constexpr int LAST_NUM_WARPS_N =
+      LAST_OUTPUT_ATOM_SIZE / 16 <= 4 ? LAST_OUTPUT_ATOM_SIZE / 16 : 4;
+
+  constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
+  constexpr int LAST_NUM_WARPS_K =
+      (LAST_NUM_WARPS_N == 0) ? 0 : (4 / LAST_NUM_WARPS_N);
   constexpr int NUM_ITERS_M =
       1; // TODO: Batch size more than 16 will cause error
 
@@ -442,11 +441,8 @@ __device__ __forceinline__ void
             output_atom_idx, d_weight, d_output);
   }
 
-  // Last output atom
+  // Tail output atom that less than OUTPUT_ATOM_SIZE
   if constexpr (LAST_OUTPUT_ATOM_SIZE > 0) {
-    // process_atom.template operator()<LAST_OUTPUT_ATOM_SIZE,
-    // LAST_NUM_CHUNKS_B, LAST_NUM_WARPS_N, LAST_NUM_WARPS_K, LAST_NUM_ITERS_N,
-    // LAST_NUM_ITERS_K>(
     process_atom
         .template operator()<LAST_OUTPUT_ATOM_SIZE, NUM_WARPS_N, NUM_WARPS_K>(
             NUM_OUTPUT_ATOMS, d_weight, d_output);
