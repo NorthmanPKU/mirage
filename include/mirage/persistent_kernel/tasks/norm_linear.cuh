@@ -57,7 +57,8 @@ __device__ __forceinline__ void
 
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
-  assert(REDUCTION_SIZE % TILE_SIZE == 0);
+  static_assert(REDUCTION_SIZE % TILE_SIZE == 0,
+                "REDUCTION_SIZE must be a multiple of TILE_SIZE.");
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
 
