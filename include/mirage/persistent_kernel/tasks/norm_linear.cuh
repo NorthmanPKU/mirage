@@ -444,8 +444,8 @@ __device__ __forceinline__ void
 
   // Tail output atom that less than OUTPUT_ATOM_SIZE
   if constexpr (LAST_OUTPUT_ATOM_SIZE > 0) {
-    process_atom
-        .template operator()<LAST_OUTPUT_ATOM_SIZE, LAST_NUM_WARPS_N, LAST_NUM_WARPS_K>(
+    process_atom.template
+        operator()<LAST_OUTPUT_ATOM_SIZE, LAST_NUM_WARPS_N, LAST_NUM_WARPS_K>(
             NUM_OUTPUT_ATOMS, d_weight, d_output);
   }
 }
