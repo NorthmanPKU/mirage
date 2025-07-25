@@ -79,12 +79,16 @@ struct NormLinearKernelSpec {
       1; // TODO: Batch size more than 16 will cause error
   static_assert(BATCH_SIZE <= 16,
                 "Batch size must be less than or equal to 16 for now.");
-  static constexpr int NUM_WARPS_N =
-      (OUTPUT_ATOM_SIZE / 16 <= 4) ? (OUTPUT_ATOM_SIZE / 16) : 4;
-  static constexpr int LAST_NUM_WARPS_N =
-      (LAST_OUTPUT_ATOM_SIZE / 16 <= 4) ? (LAST_OUTPUT_ATOM_SIZE / 16) : 4;
-  static constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
-  static constexpr int LAST_NUM_WARPS_K =
+  // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
+  constexpr int NUM_WARPS_N =
+      ((OUTPUT_ATOM_SIZE + 15) / 16 == 3) ? 4 :
+      ((OUTPUT_ATOM_SIZE + 15) / 16 <= 4 ? (OUTPUT_ATOM_SIZE + 15) / 16 : 4);
+  constexpr int LAST_NUM_WARPS_N =
+      ((LAST_OUTPUT_ATOM_SIZE + 15) / 16 == 3) ? 4 :
+      ((LAST_OUTPUT_ATOM_SIZE + 15) / 16 <= 4 ? (LAST_OUTPUT_ATOM_SIZE + 15) / 16 : 4);
+
+  constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
+  constexpr int LAST_NUM_WARPS_K =
       (LAST_NUM_WARPS_N == 0) ? 0 : (4 / LAST_NUM_WARPS_N);
 
   // --- Shared Memory Layout Specification ---
