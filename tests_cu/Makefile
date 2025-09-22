@@ -19,7 +19,7 @@ NVCC_FLAGS = -std=c++17 $(OPT_FLAG) --expt-relaxed-constexpr -use_fast_math -Xco
 #   -gencode arch=compute_80,code=compute_80
 
 # Directories
-INCLUDE_DIR = -I../include -I../include/mirage/persistent_kernel/tasks
+INCLUDE_DIR = -I../include -I../include/mirage/persistent_kernel/tasks -I../deps/cutlass/include
 # INCLUDE_DIR = -I../../include
 
 # Targets

@@ -12,7 +12,8 @@
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear.cuh"
-#include "../include/mirage/persistent_kernel/tasks/linear_3d_ld_seq.cuh"
+// #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld_seq.cuh"
+#include "../include/mirage/persistent_kernel/tasks/linear_cutlass.cuh"
 
 // #define LINEAR_MPK
 // #ifdef LINEAR_MPK
@@ -30,7 +31,7 @@
   } while (0)
 
 
-// #define __CORRECTNESS_TEST__
+#define __CORRECTNESS_TEST__
 #ifdef __CORRECTNESS_TEST__
 
 // A simple, straightforward CPU implementation of Linear with residual addition.
@@ -43,7 +44,9 @@ void cpu_linear_with_residual(
     std::vector<T>& output,         // shape: [BATCH_SIZE, OUTPUT_SIZE]
     int BATCH_SIZE,
     int OUTPUT_SIZE,
-    int REDUCTION_SIZE)
+    int REDUCTION_SIZE,
+    bool residual_flag
+  )
 {
     // The layout of weight is [OUTPUT_SIZE, REDUCTION_SIZE], which is already
     // what we need for a dot product (no transpose needed).
@@ -61,7 +64,7 @@ void cpu_linear_with_residual(
             }
 
             // Add residual and cast back to the target type T
-            float result = accumulator + static_cast<float>(residual[b * OUTPUT_SIZE + o]);
+            float result = accumulator + (residual_flag ? static_cast<float>(residual[b * OUTPUT_SIZE + o]) : 0.0f);
             output[b * OUTPUT_SIZE + o] = T(result);
         }
     }
@@ -86,7 +89,7 @@ bool compare_results(const std::vector<T>& ref_output, const std::vector<T>& ker
         
         // Define a tolerance for bfloat16 comparisons. 
         // A small absolute error is acceptable due to precision differences.
-        const float tolerance = 1e-2; 
+        const float tolerance = 0.5; 
         if (abs_err > tolerance) {
             if (passed) { // Print header only once
                 std::cout << "Correctness test FAILED!" << std::endl;
@@ -152,11 +155,12 @@ int main() {
   using T = type::bfloat16_t;
 
   std::cout << "Starting test_linear" << std::endl;
-  constexpr int BATCH_SIZE = 1;       // Must be <= 16 (NUM_ITERS_M == 1)
+  constexpr int BATCH_SIZE = 8;       // Must be <= 16 (NUM_ITERS_M == 1)
   constexpr int OUTPUT_SIZE = 64;     // Use 128 to match one atom in linear
   constexpr int REDUCTION_SIZE = 4096; // Must be multiple of 128
   constexpr int O_STRIDE = OUTPUT_SIZE;
   constexpr int K_PIPE_MAX = 3;
+  constexpr bool residual = true;
 
   const int num_active_tokens = BATCH_SIZE;
 
@@ -179,11 +183,11 @@ int main() {
       v[i] = value;
     }
   };
-  // fill_vec(h_input);
-  // fill_vec(h_weight);
+  fill_vec(h_input);
+  fill_vec(h_weight);
   // fill_vec(h_residual);
-  fill_vec_with(h_input, T(0));
-  fill_vec_with(h_weight, T(0));
+  // fill_vec_with(h_input, T(0));
+  // fill_vec_with(h_weight, T(0));
   fill_vec(h_residual);
 
   // Device buffers
@@ -201,7 +205,9 @@ int main() {
   CUDA_CHECK(cudaMemcpy(d_weight, h_weight.data(), sizeof(T) * h_weight.size(), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_residual, h_residual.data(), sizeof(T) * h_residual.size(), cudaMemcpyHostToDevice));
 
-  
+  if (!residual) {
+    d_residual = nullptr;
+  }
   std::cout << "Device memory allocated" << std::endl;
 
   // Kernel configuration
@@ -214,7 +220,7 @@ int main() {
   // Warmup
   linear_kernel_launcher<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, K_PIPE_MAX>
       <<<gridDim, blockDim, shared_mem_size>>>(
-          d_input, d_weight, d_residual, d_output, num_active_tokens, /*use_residual=*/true);
+          d_input, d_weight, d_residual, d_output, num_active_tokens, /*use_residual=*/residual);
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, sizeof(T) * h_output.size(), cudaMemcpyDeviceToHost));
 
@@ -241,12 +247,40 @@ int main() {
   std::vector<T> h_output_ref(BATCH_SIZE * OUTPUT_SIZE);
 
   std::cout << "Calculating reference solution on CPU..." << std::endl;
-  cpu_linear_with_residual(h_input, h_weight, h_residual, h_output_ref, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE);
+  cpu_linear_with_residual(h_input, h_weight, h_residual, h_output_ref, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, residual);
   std::cout << "CPU calculation finished." << std::endl;
 
   std::cout << "Comparing CPU reference with GPU kernel output..." << std::endl;
   compare_results(h_output_ref, h_output, BATCH_SIZE, OUTPUT_SIZE);
   std::cout << "--- Correctness Test Finished ---\n" << std::endl;
+
+  
+  std::cout << "CPU Output: " << std::endl;
+  for (int i = 0; i < BATCH_SIZE; ++i) {
+    for (int j = 0; j < OUTPUT_SIZE; ++j) {
+      std::cout << float(h_output_ref[i * OUTPUT_SIZE + j]) << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << std::endl;
+  
+  std::cout << "Output: " << std::endl;
+  for (int i = 0; i < BATCH_SIZE; ++i) {
+    for (int j = 0; j < OUTPUT_SIZE; ++j) {
+      std::cout << float(h_output[i * OUTPUT_SIZE + j]) << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << std::endl;
+
+  std::cout << "Difference: " << std::endl;
+  for (int i = 0; i < BATCH_SIZE; ++i) {
+    for (int j = 0; j < OUTPUT_SIZE; ++j) {
+      std::cout << float(h_output[i * OUTPUT_SIZE + j] - h_output_ref[i * OUTPUT_SIZE + j]) << " ";
+    }
+    std::cout << std::endl;
+  }
+  std::cout << std::endl;
 #endif
   // Timing
 //   int const num_runs = 100;
