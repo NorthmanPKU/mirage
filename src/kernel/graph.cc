@@ -106,7 +106,7 @@ bool Graph::can_allocate(DTensor const &tensor,
   }
 
   size_t data_size = ((tensor.data_size() + 15) & ~15);
-  if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_DATA_SIZE) {
+  if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_SIZE) {
     return false;
   }
   if (allocate_fingerprint) {
@@ -126,8 +126,7 @@ bool Graph::can_allocate(size_t data_size_in_bytes,
     return true;
   }
 
-  if (dmem_data_offset + data_size_in_bytes >
-      mirage::config::MAX_DMEM_DATA_SIZE) {
+  if (dmem_data_offset + data_size_in_bytes > mirage::config::MAX_DMEM_SIZE) {
     return false;
   }
   if (dmem_fp_offset + fp_size_in_bytes > mirage::config::MAX_DMEM_FP_SIZE) {
@@ -156,8 +155,6 @@ bool Graph::allocate(DTensor &tensor, bool allocate_fingerprint) {
     allocated_fp_tensors.push_back(std::make_pair(ret, aligns_size));
   }
 
-  // Assert that we haven't used more than what we pre-allocated
-  // assert(dmem_offset <= dmm->total_size);
   return true;
 }
 
@@ -493,6 +490,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_rmsnorm_hopper_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_RMS_NORM_HOPPER, variant_id);
+  } else if (name == "linear_swapAB_hopper") {
+    int variant_id = task_register->register_linear_swapAB_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_LINEAR_SWAPAB_HOPPER, variant_id);
+  } else if (name == "linear_swapAB_with_residual_hopper") {
+    int variant_id = task_register->register_linear_swapAB_hopper_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] = std::make_tuple(
+        3, 1, TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

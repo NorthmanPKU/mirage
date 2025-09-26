@@ -76,7 +76,11 @@ static struct PyModuleDef ModuleDef = {
   "__mirage_launcher",
   NULL, //documentation
   -1, //size
-  ModuleMethods
+  ModuleMethods,
+  NULL, // m_slots
+  NULL, // m_traverse
+  NULL, // m_clear
+  NULL  // m_free
 };
 
 PyMODINIT_FUNC PyInit___mirage_launcher(void) {
@@ -125,6 +129,13 @@ def get_compile_command(
         cc,
         file_name,
         "-O3",
+        # Use following flags when debugging
+        # "-O0",
+        # "-g",
+        # "-G",
+        # "--ptxas-options=-v",
+        # "-Xptxas=-v",
+        # "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
@@ -136,7 +147,7 @@ def get_compile_command(
     flags = [
         "-shared",
         "-std=c++17",
-        "-rdc=true",
+        "-rdc=false",
         "-use_fast_math",
         "-lcuda",
         "-Xcompiler=-fPIC",
@@ -144,7 +155,7 @@ def get_compile_command(
         "-o",
         py_so_path,
     ]
-    flags = flags + [f"-DMPK_TARGET_CC={target_cc}"]
+    flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
 
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
@@ -160,6 +171,8 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
+    # Use when debugging
+    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -177,7 +190,9 @@ def get_compile_command(
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
             "-DMPK_ENABLE_TMA",
-            "-DMIRAGE_GRACE_HOPPER"
+            "-DMIRAGE_GRACE_HOPPER",
+            "-DNDEBUG",
+            # "-DMPK_ENABLE_VERBOSE",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
@@ -586,7 +601,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_hopper" if self.target_cc == 90 else "linear")
+        self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper" if self.target_cc == 90 else "linear")
 
     def linear_with_residual_layer(
         self,
@@ -608,7 +623,7 @@ class PersistentKernel:
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper" if self.target_cc == 90 else "linear_with_residual")
+        self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper" if self.target_cc == 90 else "linear_with_residual")
 
     def allreduce_layer(
         self,

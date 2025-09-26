@@ -1,6 +1,7 @@
 #include "argmax.cuh"
 #include "embedding.cuh"
-#include "linear.cuh"
+// #include "linear.cuh"
+#include "linear_cutlass.cuh"
 #include "multitoken_paged_attention.cuh"
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"
@@ -15,5 +16,6 @@
 #include "speculative_decoding/target_verify.cuh"
 // Hopper kernels
 #include "hopper/linear_hopper.cuh"
+#include "hopper/linear_swapAB_hopper.cuh"
 #include "hopper/multitoken_paged_attention_hopper.cuh"
 #include "hopper/rmsnorm_hopper.cuh"
