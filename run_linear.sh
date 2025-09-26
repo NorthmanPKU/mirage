@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./run_linear.sh [experiment_name]
-# Example: ./run_linear.sh linear_p2_64
-# If not provided, defaults to "linear_p2_64".
+# Usage: ./run_linear.sh [-noanal] [experiment_name]
+# Example: ./run_linear.sh -noanal linear_p2_64
+# If experiment_name is not provided, defaults to "linear_p2_64".
+# When -noanal is passed, the analyze step is skipped.
 
-EXP_NAME="${1:-linear_p2_64}"
+# Parse arguments
+NO_ANALYZE=0
+ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "-na" ] || [ "$arg" = "--noanal" ]; then
+    NO_ANALYZE=1
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+EXP_NAME="${ARGS[0]:-linear_p2_64}"
 
 PROJECT_ROOT="/home/jianan/mirage"
 TEST_DIR="${PROJECT_ROOT}/tests_cu"
@@ -23,9 +35,11 @@ make -C "${TEST_DIR}" test_linear "OUT=${OUT_BIN}"
 echo "[Run] ${OUT_PATH}"
 "${OUT_PATH}"
 
+if [ "${NO_ANALYZE}" -eq 0 ]; then
 echo "[Analyze] ${ANALYZE_SCRIPT} ${REPORT_PATH} linear_kernel_launcher ${OUT_PATH}"
 "${ANALYZE_SCRIPT}" "${REPORT_PATH}" linear_kernel_launcher "${OUT_PATH}"
-
 echo "Done. Report: ${REPORT_PATH}"
-
-
+else
+echo "[Analyze] skipped (-noanal)"
+echo "Done."
+fi

@@ -10,7 +10,7 @@ else
 endif
 
 # Compiler flags
-NVCC_FLAGS = -std=c++17 $(OPT_FLAG) --expt-relaxed-constexpr -use_fast_math -Xcompiler -Wno-psabi -arch=native -lineinfo
+NVCC_FLAGS = -std=c++17 $(OPT_FLAG) --expt-relaxed-constexpr  -use_fast_math -Xcompiler -Wno-psabi -arch=native -lineinfo -DMIRAGE_BACKEND_USE_CUDA
 #   -gencode arch=compute_80,code=sm_80 \
 #   -gencode arch=compute_86,code=sm_86 \
 #   -gencode arch=compute_89,code=sm_89 \

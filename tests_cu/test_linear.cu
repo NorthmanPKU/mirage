@@ -13,7 +13,7 @@
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld_seq.cuh"
-#include "../include/mirage/persistent_kernel/tasks/linear_cutlass.cuh"
+#include "../include/mirage/persistent_kernel/tasks/linear_cutlass_swizzle.cuh"
 
 // #define LINEAR_MPK
 // #ifdef LINEAR_MPK
@@ -156,7 +156,7 @@ int main() {
 
   std::cout << "Starting test_linear" << std::endl;
   constexpr int BATCH_SIZE = 8;       // Must be <= 16 (NUM_ITERS_M == 1)
-  constexpr int OUTPUT_SIZE = 64;     // Use 128 to match one atom in linear
+  constexpr int OUTPUT_SIZE = 256;     // Use 128 to match one atom in linear
   constexpr int REDUCTION_SIZE = 4096; // Must be multiple of 128
   constexpr int O_STRIDE = OUTPUT_SIZE;
   constexpr int K_PIPE_MAX = 3;
