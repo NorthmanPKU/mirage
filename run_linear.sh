@@ -26,14 +26,15 @@ OUT_PATH="${TEST_DIR}/${OUT_BIN}"
 REPORT_DIR="${PROJECT_ROOT}/report"
 REPORT_PATH="${REPORT_DIR}/${EXP_NAME}.ncu-rep"
 ANALYZE_SCRIPT="${PROJECT_ROOT}/analyze.sh"
+CUDA_VISIBLE_DEVICES=7
 
 mkdir -p "${REPORT_DIR}"
 
 echo "[Build] make -C ${TEST_DIR} test_linear OUT=${OUT_BIN}"
 make -C "${TEST_DIR}" test_linear "OUT=${OUT_BIN}"
 
-echo "[Run] ${OUT_PATH}"
-"${OUT_PATH}"
+echo "[Run] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} ${OUT_PATH}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${OUT_PATH}"
 
 if [ "${NO_ANALYZE}" -eq 0 ]; then
 echo "[Analyze] ${ANALYZE_SCRIPT} ${REPORT_PATH} linear_kernel_launcher ${OUT_PATH}"

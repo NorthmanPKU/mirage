@@ -5,6 +5,10 @@
 #include <iomanip>
 #include <cmath>
 
+#if !defined(MIRAGE_BACKEND_USE_CUDA) && !defined(MIRAGE_BACKEND_USE_NKI)
+#define MIRAGE_BACKEND_USE_CUDA
+#endif
+
 #include "../include/mirage/config.h"
 // #include "../include/mirage/persistent_kernel/tasks/linear_old.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear_reg.cuh"
@@ -14,11 +18,6 @@
 // #include "../include/mirage/persistent_kernel/tasks/linear.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld_seq.cuh"
 #include "../include/mirage/persistent_kernel/tasks/linear_cutlass_swizzle.cuh"
-
-// #define LINEAR_MPK
-// #ifdef LINEAR_MPK
-// #include "../include/mirage/persistent_kernel/tasks/linear_mpk.cuh"
-// #endif
 
 #define CUDA_CHECK(call)                                                 \
   do {                                                                   \
@@ -117,7 +116,6 @@ bool compare_results(const std::vector<T>& ref_output, const std::vector<T>& ker
 #endif
 // =================================================================
 
-#ifdef LINEAR_MPK
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -130,45 +128,54 @@ __global__ void linear_kernel_launcher(void const *input_ptr,
                                        void *output_ptr,
                                        int num_active_tokens,
                                        bool use_residual) {
+  // Each block processes a contiguous OUTPUT_SIZE slice along the global N dimension.
+  // Adjust base pointers to point at this block's slice start.
+  int worker_id = blockIdx.x;
+
+  // const T *typed_input_ptr = reinterpret_cast<const T *>(input_ptr);
+  const T *typed_weight_ptr = reinterpret_cast<const T *>(weight_ptr);
+  const T *typed_residual_ptr = reinterpret_cast<const T *>(residual_ptr);
+  T *typed_output_ptr = reinterpret_cast<T *>(output_ptr);
+
+  // Weight layout: [OUTPUT_SIZE_GLOBAL, REDUCTION_SIZE], row-major with stride REDUCTION_SIZE
+  // Offset rows by worker_id * OUTPUT_SIZE
+  const T *block_weight_ptr = typed_weight_ptr + static_cast<long long>(worker_id) * OUTPUT_SIZE * REDUCTION_SIZE;
+
+  // Output/Residual layout: [BATCH_SIZE, OUTPUT_SIZE_GLOBAL], row-major with stride O_STRIDE (global N)
+  // Offset columns by worker_id * OUTPUT_SIZE
+  T *block_output_ptr = typed_output_ptr + static_cast<long long>(worker_id) * OUTPUT_SIZE;
+  const T *block_residual_ptr = use_residual && typed_residual_ptr
+                                    ? typed_residual_ptr + static_cast<long long>(worker_id) * OUTPUT_SIZE
+                                    : nullptr;
+
   kernel::linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, K_PIPE_MAX>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr, use_residual);
+      input_ptr, block_weight_ptr, block_residual_ptr, block_output_ptr, num_active_tokens, use_residual);
 }
-#else
-template <typename T,
-          int BATCH_SIZE,
-          int OUTPUT_SIZE,
-          int REDUCTION_SIZE,
-          int O_STRIDE,
-          int K_PIPE_MAX>
-__global__ void linear_kernel_launcher(void const *input_ptr,
-                                       void const *weight_ptr,
-                                       void const *residual_ptr,
-                                       void *output_ptr,
-                                       int num_active_tokens,
-                                       bool use_residual) {
-  kernel::linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, K_PIPE_MAX>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr, num_active_tokens, use_residual);
-}
-#endif
 
 int main() {
   using T = type::bfloat16_t;
 
   std::cout << "Starting test_linear" << std::endl;
   constexpr int BATCH_SIZE = 8;       // Must be <= 16 (NUM_ITERS_M == 1)
-  constexpr int OUTPUT_SIZE = 256;     // Use 128 to match one atom in linear
+  constexpr int OUTPUT_SIZE = 256;    // Local output size per worker block
   constexpr int REDUCTION_SIZE = 4096; // Must be multiple of 128
-  constexpr int O_STRIDE = OUTPUT_SIZE;
-  constexpr int K_PIPE_MAX = 3;
-  constexpr bool residual = true;
+  // Number of blocks (workers). Change this to scale N dimension across blocks.
+  constexpr int WORKER_NUM = 96;
+  constexpr int GLOBAL_OUTPUT_SIZE = WORKER_NUM * OUTPUT_SIZE;
+  // Stride on N dimension equals global output size
+  constexpr int O_STRIDE = GLOBAL_OUTPUT_SIZE;
+  constexpr int K_PIPE_MAX = 4;
+  constexpr bool residual = false;
+
+  printf("BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, WORKER_NUM: %d, GLOBAL_OUTPUT_SIZE: %d, O_STRIDE: %d, K_PIPE_MAX: %d, residual: %d\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, WORKER_NUM, GLOBAL_OUTPUT_SIZE, O_STRIDE, K_PIPE_MAX, residual);
 
   const int num_active_tokens = BATCH_SIZE;
 
   // Host buffers
   std::vector<T> h_input(BATCH_SIZE * REDUCTION_SIZE);
-  std::vector<T> h_weight(OUTPUT_SIZE * REDUCTION_SIZE);
-  std::vector<T> h_residual(BATCH_SIZE * OUTPUT_SIZE);
-  std::vector<T> h_output(BATCH_SIZE * OUTPUT_SIZE);
+  std::vector<T> h_weight(GLOBAL_OUTPUT_SIZE * REDUCTION_SIZE);
+  std::vector<T> h_residual(BATCH_SIZE * GLOBAL_OUTPUT_SIZE);
+  std::vector<T> h_output(BATCH_SIZE * GLOBAL_OUTPUT_SIZE);
 
   // Initialize with deterministic pseudo-random data
   srand(42);
@@ -211,7 +218,7 @@ int main() {
   std::cout << "Device memory allocated" << std::endl;
 
   // Kernel configuration
-  dim3 gridDim(1);
+  dim3 gridDim(WORKER_NUM);
   dim3 blockDim(128);
   size_t shared_mem_size = mirage::runtime::MAX_SHARE_MEMORY_SIZE;
 
@@ -224,41 +231,23 @@ int main() {
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, sizeof(T) * h_output.size(), cudaMemcpyDeviceToHost));
 
-  // std::cout << "Output: " << std::endl;
-  // for (size_t row = 0; row < BATCH_SIZE; ++row) {
-  //   for (size_t col = 0; col < OUTPUT_SIZE; ++col) {
-  //     std::cout << float(h_output[row * OUTPUT_SIZE + col]) << " ";
-  //   }
-  //   std::cout << std::endl;
-  // }
-  // std::cout << std::endl;
-
-  // std::cout << "Residual: " << std::endl;
-  // for (size_t row = 0; row < BATCH_SIZE; ++row) {
-  //   for (size_t col = 0; col < OUTPUT_SIZE; ++col) {
-  //     std::cout << float(h_residual[row * OUTPUT_SIZE + col]) << " ";
-  //   }
-  //   std::cout << std::endl;
-  // }
-  // std::cout << std::endl;
-
 #ifdef __CORRECTNESS_TEST__
   std::cout << "\n--- Running Correctness Test ---" << std::endl;
-  std::vector<T> h_output_ref(BATCH_SIZE * OUTPUT_SIZE);
+  std::vector<T> h_output_ref(BATCH_SIZE * GLOBAL_OUTPUT_SIZE);
 
   std::cout << "Calculating reference solution on CPU..." << std::endl;
-  cpu_linear_with_residual(h_input, h_weight, h_residual, h_output_ref, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, residual);
+  cpu_linear_with_residual(h_input, h_weight, h_residual, h_output_ref, BATCH_SIZE, GLOBAL_OUTPUT_SIZE, REDUCTION_SIZE, residual);
   std::cout << "CPU calculation finished." << std::endl;
 
   std::cout << "Comparing CPU reference with GPU kernel output..." << std::endl;
-  compare_results(h_output_ref, h_output, BATCH_SIZE, OUTPUT_SIZE);
+  compare_results(h_output_ref, h_output, BATCH_SIZE, GLOBAL_OUTPUT_SIZE);
   std::cout << "--- Correctness Test Finished ---\n" << std::endl;
 
   
   std::cout << "CPU Output: " << std::endl;
   for (int i = 0; i < BATCH_SIZE; ++i) {
-    for (int j = 0; j < OUTPUT_SIZE; ++j) {
-      std::cout << float(h_output_ref[i * OUTPUT_SIZE + j]) << " ";
+    for (int j = 0; j < GLOBAL_OUTPUT_SIZE; ++j) {
+      std::cout << float(h_output_ref[i * GLOBAL_OUTPUT_SIZE + j]) << " ";
     }
     std::cout << std::endl;
   }
@@ -266,8 +255,8 @@ int main() {
   
   std::cout << "Output: " << std::endl;
   for (int i = 0; i < BATCH_SIZE; ++i) {
-    for (int j = 0; j < OUTPUT_SIZE; ++j) {
-      std::cout << float(h_output[i * OUTPUT_SIZE + j]) << " ";
+    for (int j = 0; j < GLOBAL_OUTPUT_SIZE; ++j) {
+      std::cout << float(h_output[i * GLOBAL_OUTPUT_SIZE + j]) << " ";
     }
     std::cout << std::endl;
   }
@@ -275,42 +264,14 @@ int main() {
 
   std::cout << "Difference: " << std::endl;
   for (int i = 0; i < BATCH_SIZE; ++i) {
-    for (int j = 0; j < OUTPUT_SIZE; ++j) {
-      std::cout << float(h_output[i * OUTPUT_SIZE + j] - h_output_ref[i * OUTPUT_SIZE + j]) << " ";
+    for (int j = 0; j < GLOBAL_OUTPUT_SIZE; ++j) {
+      std::cout << float(h_output[i * GLOBAL_OUTPUT_SIZE + j] - h_output_ref[i * GLOBAL_OUTPUT_SIZE + j]) << " ";
     }
     std::cout << std::endl;
   }
   std::cout << std::endl;
 #endif
-  // Timing
-//   int const num_runs = 100;
-//   cudaEvent_t start, stop;
-//   CUDA_CHECK(cudaEventCreate(&start));
-//   CUDA_CHECK(cudaEventCreate(&stop));
 
-//   CUDA_CHECK(cudaEventRecord(start));
-//   for (int i = 0; i < num_runs; ++i) {
-//     linear_kernel_launcher<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, K_PIPE_MAX>
-//         <<<gridDim, blockDim, shared_mem_size>>>(
-//             d_input, d_weight, d_residual, d_output, num_active_tokens, /*use_residual=*/true);
-//   }
-//   CUDA_CHECK(cudaEventRecord(stop));
-//   CUDA_CHECK(cudaEventSynchronize(stop));
-
-//   float ms = 0.0f;
-//   CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-//   std::cout << "Average kernel time over " << num_runs << " runs: " << (ms / num_runs) << " ms\n";
-
-//   // Copy back one run's output for a quick sanity print
-//   CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, sizeof(T) * h_output.size(), cudaMemcpyDeviceToHost));
-//   std::cout << "Output[0..7]: ";
-//   for (int i = 0; i < 8 && i < (int)h_output.size(); ++i) {
-//     std::cout << float(h_output[i]) << (i + 1 < 8 ? ", " : "\n");
-//   }
-
-  // Cleanup
-//   CUDA_CHECK(cudaEventDestroy(start));
-//   CUDA_CHECK(cudaEventDestroy(stop));
   CUDA_CHECK(cudaFree(d_input));
   CUDA_CHECK(cudaFree(d_weight));
   CUDA_CHECK(cudaFree(d_residual));
