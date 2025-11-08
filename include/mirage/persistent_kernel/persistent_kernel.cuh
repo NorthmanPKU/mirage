@@ -58,6 +58,12 @@ using namespace kernel;
 #endif
 #define INIT_NUM_THREADS 128
 
+__device__ int get_smid(void) {
+    int ret;
+    asm("mov.u32 %0, %smid;" : "=r"(ret) );
+    return ret;
+}
+
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -463,9 +469,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   // worker_queue_ids: 2 * 4 = 8 B
   // worker_queues: 2 * 8 = 16 B
   // remaining: 3016 B
-  if (threadIdx.x == 0) {
-    printf("[Worker for thread %d] Starting execution\n", config.thread_id);
-  }
+  // if (threadIdx.x == 0) {
+  //   printf("[Worker for model: %d] Starting execution on sm id: %d\n", config.thread_id, get_smid());
+  // } __syncthreads();
 
   constexpr int TASK_DESCS_BUFFER_LENGTH = std::min(
       (mirage::runtime::WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE - 56) /
@@ -517,7 +523,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       int queue_idx = 0;
       if (threadIdx.x == 0) {
         while (next_task_pos[queue_idx] == last_task_pos[queue_idx]) {
-          printf("[worker host thread %d] worker_queue_ids[queue_idx]: %d\n", threadIdx.x, worker_queue_ids[queue_idx]);
           last_task_pos[queue_idx] =
               ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id
                                       [worker_queue_ids[queue_idx]]);
@@ -747,6 +752,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 // need to alter as there is only one warp per block
 __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
                                                   int offset) {
+
+  // if (threadIdx.x == 0) {
+  //   printf("[Scheduler for model: %d] Starting execution on sm id: %d\n", config.thread_id, get_smid());
+  // } __syncthreads();
   int const num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
   // if we have more than 4 warps per thread block
@@ -1267,8 +1276,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   // Create worker and scheduler streams
-  cudaStreamCreate(&global_runtime_config.worker_stream);
-  cudaStreamCreate(&global_runtime_config.scheduler_stream);
+  cudaStreamCreateWithFlags(&global_runtime_config.worker_stream, cudaStreamNonBlocking);
+  cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream, cudaStreamNonBlocking);
+
+  // cudaStreamCreate(&global_runtime_config.worker_stream);
+  // cudaStreamCreate(&global_runtime_config.scheduler_stream);
 
   // launch init kernel
   // init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(

@@ -282,7 +282,7 @@ def main() -> None:
     
     # models = ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-8B", "Qwen/Qwen3-14B"]
     # models = ["Qwen/Qwen3-8B", "Qwen/Qwen3-8B"]
-    models = ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-1.7B"]
+    models = ["Qwen/Qwen3-1.7B", "Qwen/Qwen3-8B", "Qwen/Qwen3-14B"]
     # num_workers = [40, 40, 40]
     num_workers = [32, 32, 32]
     num_schedulers = [8, 8, 8]
@@ -326,7 +326,7 @@ def main() -> None:
 
     # Enqueue requests to stage-1
     for i in range(args.num_requests):
-        base_prompt = f"{args.prompt_prefix} [请求ID={i}]"
+        base_prompt = f"{args.prompt_prefix} [request ID={i}]"
         q_in.put((i, base_prompt))
 
     # Close input and propagate sentinels through pipeline
