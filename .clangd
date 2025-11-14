@@ -1,0 +1,34 @@
+---
+CompileFlags:
+  Add:
+    - -std=c++17
+    - -I/home/jianan/mirage/include
+    - -I/home/jianan/mirage/deps/cutlass/include
+    - -I/home/jianan/mirage/deps/cutlass/tools/util/include
+    - -I/home/jianan/mirage/deps/json/include
+    - -I/usr/include/nvshmem_12
+    - -I/usr/include
+    - -DMIRAGE_BACKEND_USE_CUDA
+    - -DMPK_TARGET_CC=90
+    - -DMODE_OFFLINE
+    - -DMPK_ENABLE_TMA
+    - -include /home/jianan/mirage/tools/clangd/clangd_overrides.h
+
+---
+If:
+  PathMatch: [".*\\.cu$", ".*\\.cuh$"]
+CompileFlags:
+  Add:
+    - -xcuda
+    - --cuda-path=/usr/local/cuda
+    - --cuda-gpu-arch=sm_90a
+    - -I/usr/local/cuda/include
+
+---
+FallbackFlags:
+  Add: [
+    -std=c++17,
+    -I${workspaceFolder}/include/mirage/persistent_kernel,
+    -I${workspaceFolder}/include/mirage/persistent_kernel/tasks,
+    -I/usr/local/cuda/include
+  ]
